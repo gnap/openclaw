@@ -362,6 +362,7 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
   let sessionId: string | undefined;
   let usage: CliUsage | undefined;
   const texts: string[] = [];
+  let thinkingText = "";
   for (const line of lines) {
     let parsed: unknown;
     try {
@@ -381,6 +382,17 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
     if (isRecord(parsed.usage)) {
       usage = toUsage(parsed.usage) ?? usage;
     }
+    // Extract thinking content from cursor-agent thinking messages
+    // Format: {"type":"thinking","subtype":"delta","text":"..."}
+    const msgType = typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
+    if (msgType === "thinking") {
+      const subtype = typeof parsed.subtype === "string" ? parsed.subtype.toLowerCase() : "";
+      if (subtype === "delta" && typeof parsed.text === "string") {
+        thinkingText += parsed.text;
+      }
+      // Skip thinking messages - we handle them separately
+      continue;
+    }
     const item = isRecord(parsed.item) ? parsed.item : null;
     if (item && typeof item.text === "string") {
       const type = typeof item.type === "string" ? item.type.toLowerCase() : "";
@@ -388,8 +400,23 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
         texts.push(item.text);
       }
     }
+    // Support cursor-agent format: {"type":"assistant","message":{"content":[{"text":"..."}]}}
+    // and {"type":"result","result":"..."}
+    // Cursor-agent outputs multiple assistant messages: first with partial text deltas,
+    // then a final one with the complete accumulated text, then a result message.
+    // We only want the final result text to avoid duplicates.
+    if (msgType === "result" && typeof parsed.result === "string") {
+      // result message contains the final response - use this exclusively
+      texts.length = 0; // Clear any previous texts
+      texts.push(parsed.result);
+    }
+    // Skip all assistant messages since they are either partial or duplicate of result
   }
-  const text = texts.join("\n").trim();
+  // Combine thinking content with the response (formatted as code block)
+  let text = texts.join("\n").trim();
+  if (thinkingText) {
+    text = `\`\`\`thinking\n${thinkingText}\n\`\`\`\n\n${text}`;
+  }
   if (!text) {
     return null;
   }
