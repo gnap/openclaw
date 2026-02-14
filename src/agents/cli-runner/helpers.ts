@@ -170,7 +170,8 @@ type CliUsage = {
 };
 
 export type CliOutput = {
-  text: string;
+  text?: string;
+  texts?: string[];
   sessionId?: string;
   usage?: CliUsage;
 };
@@ -393,12 +394,32 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
       // Skip thinking messages - we handle them separately
       continue;
     }
+    // Extract text from assistant messages (both "item" and "message" formats)
     const item = isRecord(parsed.item) ? parsed.item : null;
+    let assistantText = "";
     if (item && typeof item.text === "string") {
       const type = typeof item.type === "string" ? item.type.toLowerCase() : "";
       if (!type || type.includes("message")) {
-        texts.push(item.text);
+        assistantText = item.text;
       }
+    }
+    // Also check parsed.message for text content (cursor-agent format)
+    if (!assistantText && isRecord(parsed.message)) {
+      const msg = parsed.message;
+      if (typeof msg.text === "string") {
+        assistantText = msg.text;
+      } else if (Array.isArray(msg.content)) {
+        // content is array of blocks
+        for (const block of msg.content) {
+          if (isRecord(block) && typeof block.text === "string") {
+            assistantText = block.text;
+            break;
+          }
+        }
+      }
+    }
+    if (assistantText) {
+      texts.push(assistantText);
     }
     // Support cursor-agent format: {"type":"assistant","message":{"content":[{"text":"..."}]}}
     // and {"type":"result","result":"..."}
@@ -406,21 +427,75 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
     // then a final one with the complete accumulated text, then a result message.
     // We only want the final result text to avoid duplicates.
     if (msgType === "result" && typeof parsed.result === "string") {
-      // result message contains the final response - use this exclusively
-      texts.length = 0; // Clear any previous texts
+      // result message contains the final response - append it (don't clear tool outputs)
       texts.push(parsed.result);
+    }
+    // Extract tool_call results (command output)
+    // Format: {"type":"tool_call","subtype":"completed","tool_call":{"shellToolCall":{"result":{"success":{"stdout":"..."}}}}}
+    if (msgType === "tool_call" && isRecord(parsed.tool_call)) {
+      const shellToolCall = isRecord(parsed.tool_call.shellToolCall)
+        ? parsed.tool_call.shellToolCall
+        : null;
+      if (shellToolCall) {
+        const result = isRecord(shellToolCall.result) ? shellToolCall.result : null;
+        if (result) {
+          if (isRecord(result.success)) {
+            const stdout =
+              typeof result.success.stdout === "string" ? result.success.stdout.trim() : "";
+            const stderr =
+              typeof result.success.stderr === "string" ? result.success.stderr.trim() : "";
+            const exitCode =
+              typeof result.success.exitCode === "number" ? result.success.exitCode : 0;
+            if (stdout || stderr) {
+              let output = "";
+              if (stdout) {
+                output += stdout;
+              }
+              if (stderr) {
+                output += (output ? "\n" : "") + `stderr: ${stderr}`;
+              }
+              output += `\n(exit code: ${exitCode})`;
+              texts.push(output);
+            }
+          } else if (isRecord(result.failure)) {
+            const stderr =
+              typeof result.failure.stderr === "string" ? result.failure.stderr.trim() : "";
+            const exitCode =
+              typeof result.failure.exitCode === "number" ? result.failure.exitCode : 1;
+            let output = `Command failed (exit code: ${exitCode})`;
+            if (stderr) {
+              output += `\nstderr: ${stderr}`;
+            }
+            texts.push(output);
+          }
+        }
+      }
     }
     // Skip all assistant messages since they are either partial or duplicate of result
   }
-  // Combine thinking content with the response (formatted as code block)
-  let text = texts.join("\n").trim();
+
+  // Build message blocks in chronological order
+  const messageBlocks: string[] = [];
+
+  // Add thinking content as a separate block (formatted as code block)
   if (thinkingText) {
-    text = `\`\`\`thinking\n${thinkingText}\n\`\`\`\n\n${text}`;
+    messageBlocks.push(`\`\`\`thinking\n${thinkingText}\n\`\`\``);
   }
-  if (!text) {
-    return null;
+
+  // Add all collected texts (tool outputs + final result + any assistant text)
+  // These are already in chronological order from the loop
+  for (const text of texts) {
+    if (text.trim()) {
+      messageBlocks.push(text);
+    }
   }
-  return { text, sessionId, usage };
+
+  // If we have message blocks, return them
+  if (messageBlocks.length > 0) {
+    return { texts: messageBlocks, sessionId, usage };
+  }
+
+  return null;
 }
 
 export function resolveSystemPromptUsage(params: {

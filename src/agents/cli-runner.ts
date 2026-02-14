@@ -286,7 +286,13 @@ export async function runCliAgent(params: {
     });
 
     const text = output.text?.trim();
-    const payloads = text ? [{ text }] : undefined;
+    // Support both single text and multiple texts (for tool call outputs)
+    let payloads;
+    if (output.texts && output.texts.length > 0) {
+      payloads = output.texts.map((t) => ({ text: t.trim() })).filter((p) => p.text);
+    } else if (text) {
+      payloads = [{ text }];
+    }
 
     return {
       payloads,
