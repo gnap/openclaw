@@ -364,6 +364,7 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
   let usage: CliUsage | undefined;
   const texts: string[] = [];
   let thinkingText = "";
+  let hasResult = false; // Track if we've seen a result message
   for (const line of lines) {
     let parsed: unknown;
     try {
@@ -394,41 +395,9 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
       // Skip thinking messages - we handle them separately
       continue;
     }
-    // Extract text from assistant messages (both "item" and "message" formats)
-    const item = isRecord(parsed.item) ? parsed.item : null;
-    let assistantText = "";
-    if (item && typeof item.text === "string") {
-      const type = typeof item.type === "string" ? item.type.toLowerCase() : "";
-      if (!type || type.includes("message")) {
-        assistantText = item.text;
-      }
-    }
-    // Also check parsed.message for text content (cursor-agent format)
-    if (!assistantText && isRecord(parsed.message)) {
-      const msg = parsed.message;
-      if (typeof msg.text === "string") {
-        assistantText = msg.text;
-      } else if (Array.isArray(msg.content)) {
-        // content is array of blocks
-        for (const block of msg.content) {
-          if (isRecord(block) && typeof block.text === "string") {
-            assistantText = block.text;
-            break;
-          }
-        }
-      }
-    }
-    if (assistantText) {
-      texts.push(assistantText);
-    }
-    // Support cursor-agent format: {"type":"assistant","message":{"content":[{"text":"..."}]}}
-    // and {"type":"result","result":"..."}
-    // Cursor-agent outputs multiple assistant messages: first with partial text deltas,
-    // then a final one with the complete accumulated text, then a result message.
-    // We only want the final result text to avoid duplicates.
-    if (msgType === "result" && typeof parsed.result === "string") {
-      // result message contains the final response - append it (don't clear tool outputs)
-      texts.push(parsed.result);
+    // Skip assistant messages if we already have result (they are duplicates)
+    if (msgType === "assistant" && hasResult) {
+      continue;
     }
     // Extract tool_call results (command output)
     // Format: {"type":"tool_call","subtype":"completed","tool_call":{"shellToolCall":{"result":{"success":{"stdout":"..."}}}}}
@@ -470,8 +439,16 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
           }
         }
       }
+      continue;
     }
-    // Skip all assistant messages since they are either partial or duplicate of result
+    // Handle result message - this is the final consolidated output
+    // Cursor-agent sends this after all assistant messages
+    if (msgType === "result" && typeof parsed.result === "string") {
+      hasResult = true;
+      texts.push(parsed.result);
+      continue;
+    }
+    // Skip all other messages (including intermediate assistant messages)
   }
 
   // Build message blocks in chronological order
