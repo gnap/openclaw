@@ -360,11 +360,69 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
   if (lines.length === 0) {
     return null;
   }
+
   let sessionId: string | undefined;
   let usage: CliUsage | undefined;
+
+  // Output message blocks in chronological order
   const texts: string[] = [];
-  let thinkingText = "";
-  let hasResult = false; // Track if we've seen a result message
+
+  // Current accumulation state
+  let thinkingContent = "";
+  let assistantContent = "";
+
+  // Helper to extract text from assistant message
+  const extractAssistantText = (parsed: Record<string, unknown>): string | null => {
+    const message = isRecord(parsed.message) ? parsed.message : null;
+    const content = message?.content;
+    const contentArray = Array.isArray(content) ? content : null;
+    const firstContent = contentArray?.[0];
+    return isRecord(firstContent) ? (firstContent.text as string) : null;
+  };
+
+  // Helper to extract tool output from tool_call message
+  const extractToolOutput = (parsed: Record<string, unknown>): string | null => {
+    const toolCall = isRecord(parsed.tool_call) ? parsed.tool_call : null;
+    const shellToolCall = isRecord(toolCall?.shellToolCall) ? toolCall.shellToolCall : null;
+    if (!shellToolCall) {
+      return null;
+    }
+
+    const result = isRecord(shellToolCall.result) ? shellToolCall.result : null;
+    if (!result) {
+      return null;
+    }
+
+    if (isRecord(result.success)) {
+      const stdout = typeof result.success.stdout === "string" ? result.success.stdout.trim() : "";
+      const stderr = typeof result.success.stderr === "string" ? result.success.stderr.trim() : "";
+      const exitCode = typeof result.success.exitCode === "number" ? result.success.exitCode : 0;
+      if (!stdout && !stderr) {
+        return null;
+      }
+
+      let output = "";
+      if (stdout) {
+        output += stdout;
+      }
+      if (stderr) {
+        output += (output ? "\n" : "") + `stderr: ${stderr}`;
+      }
+      output += `\n(exit code: ${exitCode})`;
+      return output;
+    }
+    if (isRecord(result.failure)) {
+      const stderr = typeof result.failure.stderr === "string" ? result.failure.stderr.trim() : "";
+      const exitCode = typeof result.failure.exitCode === "number" ? result.failure.exitCode : 1;
+      let output = `Command failed (exit code: ${exitCode})`;
+      if (stderr) {
+        output += `\nstderr: ${stderr}`;
+      }
+      return output;
+    }
+    return null;
+  };
+
   for (const line of lines) {
     let parsed: unknown;
     try {
@@ -384,92 +442,113 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
     if (isRecord(parsed.usage)) {
       usage = toUsage(parsed.usage) ?? usage;
     }
-    // Extract thinking content from cursor-agent thinking messages
-    // Format: {"type":"thinking","subtype":"delta","text":"..."}
+
     const msgType = typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
+
+    // Thinking: accumulate deltas
     if (msgType === "thinking") {
       const subtype = typeof parsed.subtype === "string" ? parsed.subtype.toLowerCase() : "";
       if (subtype === "delta" && typeof parsed.text === "string") {
-        thinkingText += parsed.text;
+        thinkingContent += parsed.text;
       }
-      // Skip thinking messages - we handle them separately
       continue;
     }
-    // Skip assistant messages if we already have result (they are duplicates)
-    if (msgType === "assistant" && hasResult) {
-      continue;
-    }
-    // Extract tool_call results (command output)
-    // Format: {"type":"tool_call","subtype":"completed","tool_call":{"shellToolCall":{"result":{"success":{"stdout":"..."}}}}}
-    if (msgType === "tool_call" && isRecord(parsed.tool_call)) {
-      const shellToolCall = isRecord(parsed.tool_call.shellToolCall)
-        ? parsed.tool_call.shellToolCall
-        : null;
-      if (shellToolCall) {
-        const result = isRecord(shellToolCall.result) ? shellToolCall.result : null;
-        if (result) {
-          if (isRecord(result.success)) {
-            const stdout =
-              typeof result.success.stdout === "string" ? result.success.stdout.trim() : "";
-            const stderr =
-              typeof result.success.stderr === "string" ? result.success.stderr.trim() : "";
-            const exitCode =
-              typeof result.success.exitCode === "number" ? result.success.exitCode : 0;
-            if (stdout || stderr) {
-              let output = "";
-              if (stdout) {
-                output += stdout;
-              }
-              if (stderr) {
-                output += (output ? "\n" : "") + `stderr: ${stderr}`;
-              }
-              output += `\n(exit code: ${exitCode})`;
-              texts.push(output);
-            }
-          } else if (isRecord(result.failure)) {
-            const stderr =
-              typeof result.failure.stderr === "string" ? result.failure.stderr.trim() : "";
-            const exitCode =
-              typeof result.failure.exitCode === "number" ? result.failure.exitCode : 1;
-            let output = `Command failed (exit code: ${exitCode})`;
-            if (stderr) {
-              output += `\nstderr: ${stderr}`;
-            }
-            texts.push(output);
+
+    // Assistant: accumulate deltas, handle consolidation
+    if (msgType === "assistant") {
+      const text = extractAssistantText(parsed);
+      if (typeof text === "string" && text.trim()) {
+        const currentKey = parsed.model_call_id as string | undefined;
+
+        // Check if this is a consolidated message (has model_call_id)
+        // Consolidated messages replace accumulated content, not append
+        if (currentKey) {
+          // This is a consolidated message - replace accumulated content
+          assistantContent = text;
+        } else {
+          // This is a delta message - accumulate it
+          // Check if we already have content and if so, check for consolidation
+          if (
+            assistantContent &&
+            (text.includes(assistantContent) || assistantContent.includes(text))
+          ) {
+            // Already have this content, skip to avoid duplicates
+          } else {
+            assistantContent += text;
           }
         }
       }
       continue;
     }
-    // Handle result message - this is the final consolidated output
-    // Cursor-agent sends this after all assistant messages
-    if (msgType === "result" && typeof parsed.result === "string") {
-      hasResult = true;
-      texts.push(parsed.result);
+
+    // Tool call completed: flush assistant, add tool output
+    const toolSubtype = typeof parsed.subtype === "string" ? parsed.subtype.toLowerCase() : "";
+    if (msgType === "tool_call" && toolSubtype === "completed") {
+      const toolCall = isRecord(parsed.tool_call) ? parsed.tool_call : null;
+      const isShellTool = isRecord(toolCall?.shellToolCall);
+
+      // Only flush assistant content for shell tool calls (user commands)
+      // Skip flushing for read tool calls (workspace file reads are preparation, not response)
+      if (assistantContent.trim() && isShellTool) {
+        texts.push(assistantContent.trim());
+      }
+
+      // Only clear assistant content for shell tool calls, not for read tools
+      // This preserves assistant content across multiple read tool calls
+      if (isShellTool) {
+        assistantContent = "";
+      }
+
+      // Add tool output
+      const toolOutput = extractToolOutput(parsed);
+      if (toolOutput) {
+        texts.push(toolOutput);
+      }
       continue;
     }
-    // Skip all other messages (including intermediate assistant messages)
-  }
 
-  // Build message blocks in chronological order
-  const messageBlocks: string[] = [];
+    // Result: final consolidated output
+    // Only add if we haven't captured any content yet (no tool calls)
+    if (msgType === "result" && typeof parsed.result === "string") {
+      // Only flush remaining assistant content if we have no tool output
+      // (assistant content after tool call is not useful)
+      if (assistantContent.trim() && texts.length === 0) {
+        texts.push(assistantContent.trim());
+      }
+      assistantContent = "";
 
-  // Add thinking content as a separate block (formatted as code block)
-  if (thinkingText) {
-    messageBlocks.push(`\`\`\`thinking\n${thinkingText}\n\`\`\``);
-  }
-
-  // Add all collected texts (tool outputs + final result + any assistant text)
-  // These are already in chronological order from the loop
-  for (const text of texts) {
-    if (text.trim()) {
-      messageBlocks.push(text);
+      // Only add result if we haven't captured any tool output
+      if (texts.length === 0) {
+        texts.push(parsed.result);
+      }
+      // Clear thinking content
+      thinkingContent = "";
+      continue;
     }
   }
 
-  // If we have message blocks, return them
-  if (messageBlocks.length > 0) {
-    return { texts: messageBlocks, sessionId, usage };
+  // Finalize: flush remaining thinking at the beginning, assistant at the end
+  const finalTexts: string[] = [];
+
+  // Add thinking first (if any)
+  if (thinkingContent.trim()) {
+    finalTexts.push(`\`\`\`thinking\n${thinkingContent.trim()}\n\`\`\``);
+  }
+
+  // Add all captured texts (assistant before tool + tool outputs)
+  for (const text of texts) {
+    if (text.trim()) {
+      finalTexts.push(text.trim());
+    }
+  }
+
+  // Add accumulated assistant content at the end (assistant after tool)
+  if (assistantContent.trim()) {
+    finalTexts.push(assistantContent.trim());
+  }
+
+  if (finalTexts.length > 0) {
+    return { texts: finalTexts, sessionId, usage };
   }
 
   return null;
