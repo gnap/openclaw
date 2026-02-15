@@ -416,7 +416,7 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
         output += (output ? "\n" : "") + `stderr: ${stderr}`;
       }
       output += `\n(exit code: ${exitCode})`;
-      return output;
+      return `\`\`\`\n${output}\n\`\`\``;
     }
     if (isRecord(result.failure)) {
       const stderr = typeof result.failure.stderr === "string" ? result.failure.stderr.trim() : "";
@@ -429,7 +429,7 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
       if (stderr) {
         output += `\nstderr: ${stderr}`;
       }
-      return output;
+      return `\`\`\`\n${output}\n\`\`\``;
     }
     return null;
   };
