@@ -388,6 +388,10 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
       return null;
     }
 
+    // Extract the command that was executed
+    const args = isRecord(shellToolCall.args) ? shellToolCall.args : null;
+    const command = typeof args?.command === "string" ? args.command : null;
+
     const result = isRecord(shellToolCall.result) ? shellToolCall.result : null;
     if (!result) {
       return null;
@@ -402,6 +406,9 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
       }
 
       let output = "";
+      if (command) {
+        output += `$ ${command}\n`;
+      }
       if (stdout) {
         output += stdout;
       }
@@ -414,7 +421,11 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
     if (isRecord(result.failure)) {
       const stderr = typeof result.failure.stderr === "string" ? result.failure.stderr.trim() : "";
       const exitCode = typeof result.failure.exitCode === "number" ? result.failure.exitCode : 1;
-      let output = `Command failed (exit code: ${exitCode})`;
+      let output = "";
+      if (command) {
+        output += `$ ${command}\n`;
+      }
+      output += `Command failed (exit code: ${exitCode})`;
       if (stderr) {
         output += `\nstderr: ${stderr}`;
       }
