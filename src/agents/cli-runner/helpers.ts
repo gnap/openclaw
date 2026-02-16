@@ -361,6 +361,49 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
     return null;
   }
 
+  // Detect if this is cursor-agent based on CLI command path
+  const isCursorAgent = backend.command.toLowerCase().includes("cursor");
+
+  // If not cursor-agent, use the main branch logic (extract from parsed.item.text)
+  if (!isCursorAgent) {
+    let sessionId: string | undefined;
+    let usage: CliUsage | undefined;
+    const texts: string[] = [];
+    for (const line of lines) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!isRecord(parsed)) {
+        continue;
+      }
+      if (!sessionId) {
+        sessionId = pickSessionId(parsed, backend);
+      }
+      if (!sessionId && typeof parsed.thread_id === "string") {
+        sessionId = parsed.thread_id.trim();
+      }
+      if (isRecord(parsed.usage)) {
+        usage = toUsage(parsed.usage) ?? usage;
+      }
+      const item = isRecord(parsed.item) ? parsed.item : null;
+      if (item && typeof item.text === "string") {
+        const type = typeof item.type === "string" ? item.type.toLowerCase() : "";
+        if (!type || type.includes("message")) {
+          texts.push(item.text);
+        }
+      }
+    }
+    const text = texts.join("\n").trim();
+    if (!text) {
+      return null;
+    }
+    return { text, sessionId, usage };
+  }
+
+  // === Cursor-agent specific parsing ===
   let sessionId: string | undefined;
   let usage: CliUsage | undefined;
 
