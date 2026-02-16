@@ -294,12 +294,14 @@ export async function runCliAgent(params: {
       payloads = [{ text }];
     }
 
+    const returnedSessionId = output.sessionId ?? sessionIdSent ?? params.sessionId;
+
     return {
       payloads,
       meta: {
         durationMs: Date.now() - started,
         agentMeta: {
-          sessionId: output.sessionId ?? sessionIdSent ?? params.sessionId ?? "",
+          sessionId: returnedSessionId ?? "",
           provider: params.provider,
           model: modelId,
           usage: output.usage,
