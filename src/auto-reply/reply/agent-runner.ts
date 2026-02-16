@@ -363,6 +363,13 @@ export async function runReplyAgent(params: {
 
     const payloadArray = runResult.payloads ?? [];
 
+    // DEBUG: Log payload info
+    defaultRuntime.error(
+      `[DEBUG] agent-runner payloads: count=${payloadArray.length}, texts=${payloadArray
+        .map((p) => p.text?.slice(0, 80))
+        .join(" | ")}`,
+    );
+
     if (blockReplyPipeline) {
       await blockReplyPipeline.flush({ force: true });
       blockReplyPipeline.stop();
@@ -420,6 +427,13 @@ export async function runReplyAgent(params: {
     });
     const { replyPayloads } = payloadResult;
     didLogHeartbeatStrip = payloadResult.didLogHeartbeatStrip;
+
+    // DEBUG: Log reply payloads
+    defaultRuntime.error(
+      `[DEBUG] agent-runner replyPayloads: count=${replyPayloads.length}, texts=${replyPayloads
+        .map((p) => p.text?.slice(0, 80))
+        .join(" | ")}`,
+    );
 
     if (replyPayloads.length === 0) {
       return finalizeWithFollowup(undefined, queueKey, runFollowupTurn);

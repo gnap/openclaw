@@ -357,6 +357,7 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
     .split(/\r?\n/g)
     .map((line) => line.trim())
     .filter(Boolean);
+
   if (lines.length === 0) {
     return null;
   }
@@ -487,6 +488,10 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
     if (!isRecord(parsed)) {
       continue;
     }
+
+    const msgType = typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
+    const toolSubtype = typeof parsed.subtype === "string" ? parsed.subtype.toLowerCase() : "";
+
     if (!sessionId) {
       sessionId = pickSessionId(parsed, backend);
     }
@@ -497,7 +502,7 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
       usage = toUsage(parsed.usage) ?? usage;
     }
 
-    const msgType = typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
+    // const msgType = typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
 
     // Thinking: accumulate deltas
     if (msgType === "thinking") {
@@ -536,7 +541,6 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
     }
 
     // Tool call completed: flush assistant, add tool output
-    const toolSubtype = typeof parsed.subtype === "string" ? parsed.subtype.toLowerCase() : "";
     if (msgType === "tool_call" && toolSubtype === "completed") {
       const toolCall = isRecord(parsed.tool_call) ? parsed.tool_call : null;
       const isShellTool = isRecord(toolCall?.shellToolCall);
@@ -569,7 +573,8 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
       if (assistantContent.trim() && texts.length === 0) {
         texts.push(assistantContent.trim());
       }
-      assistantContent = "";
+      // Don't clear assistantContent here - let the final flush capture it
+      // assistantContent = "";
 
       // Only add result if we haven't captured any tool output
       if (texts.length === 0) {
