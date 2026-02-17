@@ -41,6 +41,8 @@ export type CliAgentStreamCallbacks = {
   onAssistant?: (text: string) => void;
   /** Called when tool result is received */
   onToolResult?: (text: string) => void;
+  /** Flush buffer and return total characters sent via streaming */
+  flushAndGetSentCount?: () => number;
 };
 
 export async function runCliAgent(params: {
@@ -254,8 +256,8 @@ export async function runCliAgent(params: {
             if (!event || !("text" in event)) {
               return;
             }
-            log.debug(
-              `[streaming] event type: ${event.type}, text: ${event.text?.substring(0, 50)}...`,
+            log.info(
+              `[cli-streaming] event type: ${event.type}, text: ${event.text?.substring(0, 80)}...`,
             );
             switch (event.type) {
               case "thinking":
@@ -347,11 +349,27 @@ export async function runCliAgent(params: {
       return parsed ?? { text: stdout };
     });
 
+    // Flush streaming buffer and get count of characters already sent to channel
+    const charsSentViaStreaming = params.streamCallbacks?.flushAndGetSentCount?.() ?? 0;
+    if (charsSentViaStreaming > 0) {
+      log.debug(`[cli-streaming] flushed ${charsSentViaStreaming} chars sent via streaming`);
+    }
+
     const text = output.text?.trim();
     // Support both single text and multiple texts (for tool call outputs)
     let payloads;
     if (output.texts && output.texts.length > 0) {
-      payloads = output.texts.map((t) => ({ text: t.trim() })).filter((p) => p.text);
+      // Deduplicate texts to avoid sending the same content multiple times
+      const seen = new Set<string>();
+      const uniqueTexts = output.texts.filter((t) => {
+        const trimmed = t.trim();
+        if (!trimmed || seen.has(trimmed)) {
+          return false;
+        }
+        seen.add(trimmed);
+        return true;
+      });
+      payloads = uniqueTexts.map((t) => ({ text: t.trim() })).filter((p) => p.text);
     } else if (text) {
       payloads = [{ text }];
     }
@@ -369,6 +387,9 @@ export async function runCliAgent(params: {
           usage: output.usage,
         },
       },
+      // Flag to indicate streaming sent to channel - used to avoid duplicates
+      streamingSentToChannel: charsSentViaStreaming > 0,
+      streamingCharsSent: charsSentViaStreaming,
     };
   } catch (err) {
     if (err instanceof FailoverError) {

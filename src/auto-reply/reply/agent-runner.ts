@@ -140,8 +140,23 @@ export async function runReplyAgent(params: {
   );
   const applyReplyToMode = createReplyToModeFilterForChannel(replyToMode, replyToChannel);
   const cfg = followupRun.run.config;
+  // Check if CLI provider - CLI has its own streaming via cursor-agent, don't use blockReplyPipeline
+  // Note: This checks the initial provider. The actual provider might change during fallback,
+  // but we err on the side of not creating blockReplyPipeline when streaming is enabled
+  // to avoid duplicate messages from both streaming paths.
+  const isCli = isCliProvider(followupRun.run.provider, cfg);
+  // Don't create blockReplyPipeline if:
+  // 1. Provider is CLI (has its own streaming), OR
+  // 2. Block streaming is enabled (streaming will be handled by another path)
+  const skipBlockPipeline = isCli || blockStreamingEnabled;
+
+  // DEBUG: Log decision
+  defaultRuntime.error(
+    `[DEBUG] blockPipeline: isCli=${isCli}, blockStreamingEnabled=${blockStreamingEnabled}, skipBlockPipeline=${skipBlockPipeline}, provider=${followupRun.run.provider}`,
+  );
+
   const blockReplyCoalescing =
-    blockStreamingEnabled && opts?.onBlockReply
+    !skipBlockPipeline && opts?.onBlockReply
       ? resolveBlockStreamingCoalescing(
           cfg,
           sessionCtx.Provider,
@@ -150,7 +165,7 @@ export async function runReplyAgent(params: {
         )
       : undefined;
   const blockReplyPipeline =
-    blockStreamingEnabled && opts?.onBlockReply
+    !skipBlockPipeline && opts?.onBlockReply
       ? createBlockReplyPipeline({
           onBlockReply: opts.onBlockReply,
           timeoutMs: blockReplyTimeoutMs,
@@ -362,6 +377,19 @@ export async function runReplyAgent(params: {
     }
 
     const payloadArray = runResult.payloads ?? [];
+
+    // DEBUG: Log streaming status
+    defaultRuntime.error(
+      `[DEBUG] agent-runner: streamingSentToChannel=${runResult.streamingSentToChannel}, streamingCharsSent=${runResult.streamingCharsSent}, payloadsCount=${payloadArray.length}`,
+    );
+
+    // If streaming already sent to channel, skip sending final to avoid duplicates
+    if (runResult.streamingSentToChannel) {
+      defaultRuntime.error(
+        `[DEBUG] agent-runner: streaming already sent to channel (${runResult.streamingCharsSent} chars), skipping final send`,
+      );
+      return finalizeWithFollowup(undefined, queueKey, runFollowupTurn);
+    }
 
     // DEBUG: Log payload info
     defaultRuntime.error(

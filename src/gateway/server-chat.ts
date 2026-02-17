@@ -283,27 +283,25 @@ export function createAgentEventHandler({
       return;
     }
 
-    // If within throttle window, just buffer (don't send yet)
-    if (timeSinceLastSend < 50) {
-      // Schedule a flush after deadline
-      const existingTimer = pendingFlushDeadlines.get(clientRunId);
-      if (!existingTimer) {
-        const timer = setTimeout(() => {
-          pendingFlushDeadlines.delete(clientRunId);
+    // Schedule a flush at deadline (300ms from last send)
+    const existingTimer = pendingFlushDeadlines.get(clientRunId);
+    if (!existingTimer) {
+      const remainingTime = 300 - timeSinceLastSend;
+      const timer = setTimeout(() => {
+        pendingFlushDeadlines.delete(clientRunId);
+        // Check deadline again when timer fires - flush if deadline exceeded
+        const flushNow = Date.now();
+        const lastSent = chatRunState.deltaSentAt.get(clientRunId) ?? 0;
+        const timeSinceLast = flushNow - lastSent;
+        console.log(
+          `[chat-delta] timer fired: runId=${clientRunId}, timeSinceLast=${timeSinceLast}`,
+        );
+        if (timeSinceLast > 300) {
           flushChatDelta(sessionKey, clientRunId, seq);
-        }, 50);
-        pendingFlushDeadlines.set(clientRunId, timer);
-      }
-      return;
+        }
+      }, remainingTime);
+      pendingFlushDeadlines.set(clientRunId, timer);
     }
-
-    // Otherwise, send now and schedule next deadline
-    flushChatDelta(sessionKey, clientRunId, seq);
-    const timer = setTimeout(() => {
-      pendingFlushDeadlines.delete(clientRunId);
-      flushChatDelta(sessionKey, clientRunId, seq);
-    }, 50);
-    pendingFlushDeadlines.set(clientRunId, timer);
   };
 
   const emitChatFinal = (

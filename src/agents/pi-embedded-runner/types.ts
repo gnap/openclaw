@@ -50,6 +50,10 @@ export type EmbeddedPiRunResult = {
   messagingToolSentTexts?: string[];
   // Messaging tool targets that successfully sent a message during the run.
   messagingToolSentTargets?: MessagingToolSend[];
+  // True if CLI streaming already sent content to channel (to avoid duplicates)
+  streamingSentToChannel?: boolean;
+  // Number of characters already sent via streaming to channel
+  streamingCharsSent?: number;
 };
 
 export type EmbeddedPiCompactResult = {

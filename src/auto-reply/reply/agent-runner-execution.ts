@@ -195,32 +195,62 @@ export async function runAgentTurnWithFallback(params: {
                   cliSessionId,
                   images: params.opts?.images,
                   // Pass streaming callbacks for real-time output
-                  streamCallbacks: {
-                    onReasoning: (text) => {
-                      logVerbose(`[streaming] emitting reasoning: ${text?.substring(0, 30)}...`);
-                      emitAgentEvent({
-                        runId,
-                        stream: "reasoning",
-                        data: { text },
-                      });
-                    },
-                    onAssistant: (text) => {
-                      logVerbose(`[streaming] emitting assistant: ${text?.substring(0, 30)}...`);
-                      emitAgentEvent({
-                        runId,
-                        stream: "assistant",
-                        data: { text },
-                      });
-                    },
-                    onToolResult: (text) => {
-                      logVerbose(`[streaming] emitting tool_result: ${text?.substring(0, 30)}...`);
-                      emitAgentEvent({
-                        runId,
-                        stream: "tool_result",
-                        data: { text },
-                      });
-                    },
-                  },
+                  // Also call dispatcher's callbacks to send to channels (e.g., Feishu)
+                  // Use buffering to avoid over-segmentation (multiple small messages)
+                  streamCallbacks: (() => {
+                    const dispatchToolResult = params.opts?.onToolResult;
+
+                    // Track if assistant content was sent via streaming to avoid duplicates in final send
+                    let assistantSentViaStreaming = false;
+
+                    return {
+                      // Return count of chars sent via streaming to channel
+                      // Only count assistant content (not tool results) to avoid duplicate prevention
+                      flushAndGetSentCount: () => {
+                        return assistantSentViaStreaming ? 1 : 0;
+                      },
+                      onReasoning: (text) => {
+                        logVerbose(`[streaming] emitting reasoning: ${text?.substring(0, 30)}...`);
+                        emitAgentEvent({
+                          runId,
+                          stream: "reasoning",
+                          data: { text },
+                        });
+                      },
+                      onAssistant: (text) => {
+                        logVerbose(`[streaming] emitting assistant: ${text?.substring(0, 30)}...`);
+                        emitAgentEvent({
+                          runId,
+                          stream: "assistant",
+                          data: { text },
+                        });
+                        // TODO: If we want real-time assistant streaming in the future,
+                        // we would call dispatch here and set assistantSentViaStreaming = true
+                      },
+                      onToolResult: (text) => {
+                        logVerbose(
+                          `[streaming] emitting tool_result: ${text?.substring(0, 30)}...`,
+                        );
+                        emitAgentEvent({
+                          runId,
+                          stream: "tool_result",
+                          data: { text },
+                        });
+                        // Send tool result immediately for real-time feedback
+                        // Tool results don't cause duplicate issues since final payload has different content
+                        if (dispatchToolResult && text) {
+                          const payload = { text };
+                          const result = dispatchToolResult(payload);
+                          if (result && typeof result.then === "function") {
+                            result.catch((err: unknown) =>
+                              logVerbose(`dispatchToolResult failed: ${String(err)}`),
+                            );
+                          }
+                          // Don't set assistantSentViaStreaming here - tool results are not duplicates
+                        }
+                      },
+                    };
+                  })(),
                 });
 
                 // Emit final assistant message as fallback (in case streaming didn't emit anything)
@@ -464,31 +494,37 @@ export async function runAgentTurnWithFallback(params: {
                 : undefined,
             shouldEmitToolResult: params.shouldEmitToolResult,
             shouldEmitToolOutput: params.shouldEmitToolOutput,
-            onToolResult: onToolResult
-              ? (payload) => {
-                  // `subscribeEmbeddedPiSession` may invoke tool callbacks without awaiting them.
-                  // If a tool callback starts typing after the run finalized, we can end up with
-                  // a typing loop that never sees a matching markRunComplete(). Track and drain.
-                  const task = (async () => {
-                    const { text, skip } = normalizeStreamingText(payload);
-                    if (skip) {
-                      return;
+            // Only pass onToolResult to runEmbeddedPiAgent when NOT using CLI streaming.
+            // When CLI streaming is enabled, tool results are already sent via streaming callbacks
+            // (dispatchToolResult in streamCallbacks), so we avoid duplicate sends here.
+            onToolResult:
+              isCliProvider(provider, params.followupRun.run.config) && params.opts
+                ? undefined
+                : onToolResult
+                  ? (payload) => {
+                      // `subscribeEmbeddedPiSession` may invoke tool callbacks without awaiting them.
+                      // If a tool callback starts typing after the run finalized, we can end up with
+                      // a typing loop that never sees a matching markRunComplete(). Track and drain.
+                      const task = (async () => {
+                        const { text, skip } = normalizeStreamingText(payload);
+                        if (skip) {
+                          return;
+                        }
+                        await params.typingSignals.signalTextDelta(text);
+                        await onToolResult({
+                          text,
+                          mediaUrls: payload.mediaUrls,
+                        });
+                      })()
+                        .catch((err) => {
+                          logVerbose(`tool result delivery failed: ${String(err)}`);
+                        })
+                        .finally(() => {
+                          params.pendingToolTasks.delete(task);
+                        });
+                      params.pendingToolTasks.add(task);
                     }
-                    await params.typingSignals.signalTextDelta(text);
-                    await onToolResult({
-                      text,
-                      mediaUrls: payload.mediaUrls,
-                    });
-                  })()
-                    .catch((err) => {
-                      logVerbose(`tool result delivery failed: ${String(err)}`);
-                    })
-                    .finally(() => {
-                      params.pendingToolTasks.delete(task);
-                    });
-                  params.pendingToolTasks.add(task);
-                }
-              : undefined,
+                  : undefined,
           });
         },
       });

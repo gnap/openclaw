@@ -292,7 +292,8 @@ export async function dispatchReplyFromConfig(params: {
     let accumulatedBlockText = "";
     let blockCount = 0;
 
-    const shouldSendToolSummaries = ctx.ChatType !== "group" && ctx.CommandSource !== "native";
+    // Always send tool summaries (for CLI streaming support)
+    const shouldSendToolSummaries = true;
 
     const replyResult = await (params.replyResolver ?? getReplyFromConfig)(
       ctx,
@@ -349,6 +350,11 @@ export async function dispatchReplyFromConfig(params: {
     );
 
     const replies = replyResult ? (Array.isArray(replyResult) ? replyResult : [replyResult]) : [];
+
+    // DEBUG: Log reply info
+    logVerbose(
+      `[DEBUG] dispatch-from-config: replies count=${replies.length}, replyResult=${replyResult ? "defined" : "undefined"}`,
+    );
 
     let queuedFinal = false;
     let routedFinalCount = 0;

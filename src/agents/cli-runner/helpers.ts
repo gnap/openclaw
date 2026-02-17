@@ -205,6 +205,20 @@ export function parseCliJsonlLine(line: string, backend: CliBackendConfig): CliS
 
   const msgType = typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
 
+  // Log unknown types for debugging
+  if (
+    msgType &&
+    msgType !== "thinking" &&
+    msgType !== "assistant" &&
+    msgType !== "tool_call" &&
+    msgType !== "session_id" &&
+    msgType !== "usage"
+  ) {
+    console.log(
+      `[cli-streaming] Unknown type: ${msgType}, keys: ${Object.keys(parsed).join(", ")}`,
+    );
+  }
+
   // Extract session ID
   if (!parsed.session_id && typeof parsed.thread_id === "string") {
     return { type: "session_id", sessionId: parsed.thread_id.trim() };
@@ -247,47 +261,145 @@ export function parseCliJsonlLine(line: string, backend: CliBackendConfig): CliS
   // Tool call events - extract tool result
   if (msgType === "tool_call") {
     const toolCall = isRecord(parsed.tool_call) ? parsed.tool_call : null;
+
+    // Debug: log tool_call keys
+    if (toolCall) {
+      console.log(`[cli-streaming] tool_call keys: ${Object.keys(toolCall).join(", ")}`);
+    }
+
+    // Try shell tool call first
     const shellToolCall = isRecord(toolCall?.shellToolCall) ? toolCall.shellToolCall : null;
-    if (!shellToolCall) {
-      return null;
-    }
+    if (shellToolCall) {
+      const args = isRecord(shellToolCall.args) ? shellToolCall.args : null;
+      const command = typeof args?.command === "string" ? args.command : null;
+      const result = isRecord(shellToolCall.result) ? shellToolCall.result : null;
 
-    const args = isRecord(shellToolCall.args) ? shellToolCall.args : null;
-    const command = typeof args?.command === "string" ? args.command : null;
-    const result = isRecord(shellToolCall.result) ? shellToolCall.result : null;
+      if (result) {
+        let output = "";
+        if (command) {
+          output += `$ ${command}\n`;
+        }
 
-    if (!result) {
-      return null;
-    }
+        if (isRecord(result.success)) {
+          const stdout =
+            typeof result.success.stdout === "string" ? result.success.stdout.trim() : "";
+          const stderr =
+            typeof result.success.stderr === "string" ? result.success.stderr.trim() : "";
+          const exitCode =
+            typeof result.success.exitCode === "number" ? result.success.exitCode : 0;
 
-    let output = "";
-    if (command) {
-      output += `$ ${command}\n`;
-    }
+          if (stdout) {
+            output += stdout;
+          }
+          if (stderr) {
+            output += (output ? "\n" : "") + `stderr: ${stderr}`;
+          }
+          output += `\n(exit code: ${exitCode})`;
+        } else if (isRecord(result.failure)) {
+          const stderr =
+            typeof result.failure.stderr === "string" ? result.failure.stderr.trim() : "";
+          const exitCode =
+            typeof result.failure.exitCode === "number" ? result.failure.exitCode : 1;
+          output += `Command failed (exit code: ${exitCode})`;
+          if (stderr) {
+            output += `\nstderr: ${stderr}`;
+          }
+        }
 
-    if (isRecord(result.success)) {
-      const stdout = typeof result.success.stdout === "string" ? result.success.stdout.trim() : "";
-      const stderr = typeof result.success.stderr === "string" ? result.success.stderr.trim() : "";
-      const exitCode = typeof result.success.exitCode === "number" ? result.success.exitCode : 0;
-
-      if (stdout) {
-        output += stdout;
+        if (output) {
+          return { type: "tool_result", text: `\`\`\`\n${output}\n\`\`\`` };
+        }
       }
-      if (stderr) {
-        output += (output ? "\n" : "") + `stderr: ${stderr}`;
-      }
-      output += `\n(exit code: ${exitCode})`;
-    } else if (isRecord(result.failure)) {
-      const stderr = typeof result.failure.stderr === "string" ? result.failure.stderr.trim() : "";
-      const exitCode = typeof result.failure.exitCode === "number" ? result.failure.exitCode : 1;
-      output += `Command failed (exit code: ${exitCode})`;
-      if (stderr) {
-        output += `\nstderr: ${stderr}`;
+    }
+
+    // Try read file tool call
+    const readToolCall = isRecord(toolCall?.readToolCall) ? toolCall.readToolCall : null;
+    if (readToolCall) {
+      const args = isRecord(readToolCall.args) ? readToolCall.args : null;
+      const filePath = typeof args?.file_path === "string" ? args.file_path : null;
+      const result = isRecord(readToolCall.result) ? readToolCall.result : null;
+
+      if (result) {
+        let output = "";
+        if (filePath) {
+          output += `# ${filePath}\n`;
+        }
+
+        if (typeof result.content === "string") {
+          output += result.content;
+        } else if (typeof result.error === "string") {
+          output += `Error: ${result.error}`;
+        }
+
+        if (output) {
+          return { type: "tool_result", text: `\`\`\`\n${output}\n\`\`\`` };
+        }
       }
     }
 
-    if (output) {
-      return { type: "tool_result", text: `\`\`\`\n${output}\n\`\`\`` };
+    // Try write file tool call
+    const writeToolCall = isRecord(toolCall?.writeToolCall) ? toolCall.writeToolCall : null;
+    if (writeToolCall) {
+      const args = isRecord(writeToolCall.args) ? writeToolCall.args : null;
+      const filePath = typeof args?.file_path === "string" ? args.file_path : null;
+      const result = isRecord(writeToolCall.result) ? writeToolCall.result : null;
+
+      if (result) {
+        let output = "";
+        if (filePath) {
+          output += `# ${filePath}\n`;
+        }
+
+        if (typeof result.success === "string") {
+          output += result.success;
+        } else if (typeof result.error === "string") {
+          output += `Error: ${result.error}`;
+        } else if (result.success === true) {
+          output += "File written successfully";
+        }
+
+        if (output) {
+          return { type: "tool_result", text: `\`\`\`\n${output}\n\`\`\`` };
+        }
+      }
+    }
+
+    // Try edit file tool call
+    const editToolCall = isRecord(toolCall?.editToolCall) ? toolCall.editToolCall : null;
+    if (editToolCall) {
+      const args = isRecord(editToolCall.args) ? editToolCall.args : null;
+      const filePath = typeof args?.file_path === "string" ? args.file_path : null;
+      const result = isRecord(editToolCall.result) ? editToolCall.result : null;
+
+      if (result) {
+        let output = "";
+        if (filePath) {
+          output += `# ${filePath}\n`;
+        }
+
+        if (typeof result.success === "string") {
+          output += result.success;
+        } else if (typeof result.error === "string") {
+          output += `Error: ${result.error}`;
+        } else if (result.success === true) {
+          output += "File edited successfully";
+        }
+
+        if (output) {
+          return { type: "tool_result", text: `\`\`\`\n${output}\n\`\`\`` };
+        }
+      }
+    }
+
+    // Try search files tool call
+    const searchToolCall = isRecord(toolCall?.searchToolCall) ? toolCall.searchToolCall : null;
+    if (searchToolCall) {
+      const args = isRecord(searchToolCall.args) ? searchToolCall.args : null;
+      const result = isRecord(searchToolCall.result) ? searchToolCall.result : null;
+
+      if (result && typeof result.results === "string") {
+        return { type: "tool_result", text: `\`\`\`\n${result.results}\n\`\`\`` };
+      }
     }
   }
 
@@ -546,54 +658,147 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
   // Helper to extract tool output from tool_call message
   const extractToolOutput = (parsed: Record<string, unknown>): string | null => {
     const toolCall = isRecord(parsed.tool_call) ? parsed.tool_call : null;
+
+    // Try shell tool call first
     const shellToolCall = isRecord(toolCall?.shellToolCall) ? toolCall.shellToolCall : null;
-    if (!shellToolCall) {
-      return null;
-    }
+    if (shellToolCall) {
+      // Extract the command that was executed
+      const args = isRecord(shellToolCall.args) ? shellToolCall.args : null;
+      const command = typeof args?.command === "string" ? args.command : null;
 
-    // Extract the command that was executed
-    const args = isRecord(shellToolCall.args) ? shellToolCall.args : null;
-    const command = typeof args?.command === "string" ? args.command : null;
-
-    const result = isRecord(shellToolCall.result) ? shellToolCall.result : null;
-    if (!result) {
-      return null;
-    }
-
-    if (isRecord(result.success)) {
-      const stdout = typeof result.success.stdout === "string" ? result.success.stdout.trim() : "";
-      const stderr = typeof result.success.stderr === "string" ? result.success.stderr.trim() : "";
-      const exitCode = typeof result.success.exitCode === "number" ? result.success.exitCode : 0;
-      if (!stdout && !stderr) {
+      const result = isRecord(shellToolCall.result) ? shellToolCall.result : null;
+      if (!result) {
         return null;
       }
 
-      let output = "";
-      if (command) {
-        output += `$ ${command}\n`;
+      if (isRecord(result.success)) {
+        const stdout =
+          typeof result.success.stdout === "string" ? result.success.stdout.trim() : "";
+        const stderr =
+          typeof result.success.stderr === "string" ? result.success.stderr.trim() : "";
+        const exitCode = typeof result.success.exitCode === "number" ? result.success.exitCode : 0;
+        if (!stdout && !stderr) {
+          return null;
+        }
+
+        let output = "";
+        if (command) {
+          output += `$ ${command}\n`;
+        }
+        if (stdout) {
+          output += stdout;
+        }
+        if (stderr) {
+          output += (output ? "\n" : "") + `stderr: ${stderr}`;
+        }
+        output += `\n(exit code: ${exitCode})`;
+        return `\`\`\`\n${output}\n\`\`\``;
       }
-      if (stdout) {
-        output += stdout;
+      if (isRecord(result.failure)) {
+        const stderr =
+          typeof result.failure.stderr === "string" ? result.failure.stderr.trim() : "";
+        const exitCode = typeof result.failure.exitCode === "number" ? result.failure.exitCode : 1;
+        let output = "";
+        if (command) {
+          output += `$ ${command}\n`;
+        }
+        output += `Command failed (exit code: ${exitCode})`;
+        if (stderr) {
+          output += `\nstderr: ${stderr}`;
+        }
+        return `\`\`\`\n${output}\n\`\`\``;
       }
-      if (stderr) {
-        output += (output ? "\n" : "") + `stderr: ${stderr}`;
-      }
-      output += `\n(exit code: ${exitCode})`;
-      return `\`\`\`\n${output}\n\`\`\``;
     }
-    if (isRecord(result.failure)) {
-      const stderr = typeof result.failure.stderr === "string" ? result.failure.stderr.trim() : "";
-      const exitCode = typeof result.failure.exitCode === "number" ? result.failure.exitCode : 1;
-      let output = "";
-      if (command) {
-        output += `$ ${command}\n`;
+
+    // Try read tool call
+    const readToolCall = isRecord(toolCall?.readToolCall) ? toolCall.readToolCall : null;
+    if (readToolCall) {
+      const args = isRecord(readToolCall.args) ? readToolCall.args : null;
+      const filePath = typeof args?.file_path === "string" ? args.file_path : null;
+      const result = isRecord(readToolCall.result) ? readToolCall.result : null;
+
+      if (result) {
+        let output = "";
+        if (filePath) {
+          output += `# ${filePath}\n`;
+        }
+
+        if (typeof result.content === "string") {
+          output += result.content;
+        } else if (typeof result.error === "string") {
+          output += `Error: ${result.error}`;
+        }
+
+        if (output) {
+          return `\`\`\`\n${output}\n\`\`\``;
+        }
       }
-      output += `Command failed (exit code: ${exitCode})`;
-      if (stderr) {
-        output += `\nstderr: ${stderr}`;
-      }
-      return `\`\`\`\n${output}\n\`\`\``;
     }
+
+    // Try write tool call
+    const writeToolCall = isRecord(toolCall?.writeToolCall) ? toolCall.writeToolCall : null;
+    if (writeToolCall) {
+      const args = isRecord(writeToolCall.args) ? writeToolCall.args : null;
+      const filePath = typeof args?.file_path === "string" ? args.file_path : null;
+      const result = isRecord(writeToolCall.result) ? writeToolCall.result : null;
+
+      if (result) {
+        let output = "";
+        if (filePath) {
+          output += `# ${filePath}\n`;
+        }
+
+        if (typeof result.success === "string") {
+          output += result.success;
+        } else if (typeof result.error === "string") {
+          output += `Error: ${result.error}`;
+        } else if (result.success === true) {
+          output += "File written successfully";
+        }
+
+        if (output) {
+          return `\`\`\`\n${output}\n\`\`\``;
+        }
+      }
+    }
+
+    // Try edit tool call
+    const editToolCall = isRecord(toolCall?.editToolCall) ? toolCall.editToolCall : null;
+    if (editToolCall) {
+      const args = isRecord(editToolCall.args) ? editToolCall.args : null;
+      const filePath = typeof args?.file_path === "string" ? args.file_path : null;
+      const result = isRecord(editToolCall.result) ? editToolCall.result : null;
+
+      if (result) {
+        let output = "";
+        if (filePath) {
+          output += `# ${filePath}\n`;
+        }
+
+        if (typeof result.success === "string") {
+          output += result.success;
+        } else if (typeof result.error === "string") {
+          output += `Error: ${result.error}`;
+        } else if (result.success === true) {
+          output += "File edited successfully";
+        }
+
+        if (output) {
+          return `\`\`\`\n${output}\n\`\`\``;
+        }
+      }
+    }
+
+    // Try search tool call
+    const searchToolCall = isRecord(toolCall?.searchToolCall) ? toolCall.searchToolCall : null;
+    if (searchToolCall) {
+      const result = isRecord(searchToolCall.result) ? searchToolCall.result : null;
+
+      if (result && typeof result.results === "string") {
+        return `\`\`\`\n${result.results}\n\`\`\``;
+      }
+    }
+
     return null;
   };
 
