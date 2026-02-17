@@ -259,6 +259,28 @@ export async function runCliAgent(params: {
         }
       }
 
+      // Check if process was killed due to timeout
+      if (result.killed) {
+        log.warn(`cli process killed (timeout after ${params.timeoutMs}ms)`);
+        // Try to parse partial output, but don't return raw incomplete JSON
+        if (backend.output === "jsonl") {
+          const parsed = parseCliJsonl(stdout, backend);
+          if (parsed) {
+            return {
+              ...parsed,
+              text: parsed.text
+                ? `${parsed.text}\n\n⏳ 任务超时但仍在后台运行，可用 /resume 继续`
+                : undefined,
+            };
+          }
+        }
+        // Return a clear message about timeout instead of garbled partial JSON
+        return {
+          text: "⏳ 任务执行超时，但任务可能仍在后台运行。请等待片刻后发送消息继续对话，或使用 /resume 继续之前的任务。",
+          sessionId: undefined,
+        };
+      }
+
       if (result.code !== 0) {
         const err = stderr || stdout || "CLI failed.";
         const reason = classifyFailoverReason(err) ?? "unknown";
