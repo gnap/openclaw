@@ -414,6 +414,7 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
   // Current accumulation state
   let thinkingContent = "";
   let assistantContent = "";
+  let hasToolCall = false; // Track if we had any tool calls
 
   // Helper to extract text from assistant message
   const extractAssistantText = (parsed: Record<string, unknown>): string | null => {
@@ -542,6 +543,8 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
 
     // Tool call completed: flush assistant, add tool output
     if (msgType === "tool_call" && toolSubtype === "completed") {
+      hasToolCall = true;
+
       const toolCall = isRecord(parsed.tool_call) ? parsed.tool_call : null;
       const isShellTool = isRecord(toolCall?.shellToolCall);
 
@@ -601,8 +604,9 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
     }
   }
 
-  // Add accumulated assistant content at the end (assistant after tool)
-  if (assistantContent.trim()) {
+  // Add remaining assistant content if we had tool calls
+  // (tool_call completed flushes before tool, but there may be assistant after tool)
+  if (assistantContent.trim() && hasToolCall) {
     finalTexts.push(assistantContent.trim());
   }
 
