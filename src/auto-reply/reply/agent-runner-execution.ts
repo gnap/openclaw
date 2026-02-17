@@ -194,11 +194,37 @@ export async function runAgentTurnWithFallback(params: {
                   ownerNumbers: params.followupRun.run.ownerNumbers,
                   cliSessionId,
                   images: params.opts?.images,
+                  // Pass streaming callbacks for real-time output
+                  streamCallbacks: {
+                    onReasoning: (text) => {
+                      logVerbose(`[streaming] emitting reasoning: ${text?.substring(0, 30)}...`);
+                      emitAgentEvent({
+                        runId,
+                        stream: "reasoning",
+                        data: { text },
+                      });
+                    },
+                    onAssistant: (text) => {
+                      logVerbose(`[streaming] emitting assistant: ${text?.substring(0, 30)}...`);
+                      emitAgentEvent({
+                        runId,
+                        stream: "assistant",
+                        data: { text },
+                      });
+                    },
+                    onToolResult: (text) => {
+                      logVerbose(`[streaming] emitting tool_result: ${text?.substring(0, 30)}...`);
+                      emitAgentEvent({
+                        runId,
+                        stream: "tool_result",
+                        data: { text },
+                      });
+                    },
+                  },
                 });
 
-                // CLI backends don't emit streaming assistant events, so we need to
-                // emit one with the final text so server-chat can populate its buffer
-                // and send the response to TUI/WebSocket clients.
+                // Emit final assistant message as fallback (in case streaming didn't emit anything)
+                // Also emit it if there's additional text in the result beyond what was streamed
                 const cliText = result.payloads?.[0]?.text?.trim();
                 if (cliText) {
                   emitAgentEvent({

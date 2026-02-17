@@ -20,6 +20,7 @@ import {
   normalizeCliModel,
   parseCliJson,
   parseCliJsonl,
+  parseCliJsonlLine,
   resolvePromptInput,
   resolveSessionIdToSend,
   resolveSystemPromptUsage,
@@ -31,6 +32,16 @@ import { classifyFailoverReason, isFailoverErrorMessage } from "./pi-embedded-he
 import { redactRunIdentifier, resolveRunWorkspaceDir } from "./workspace-run.js";
 
 const log = createSubsystemLogger("agent/claude-cli");
+
+/** Streaming callbacks for CLI agent output */
+export type CliAgentStreamCallbacks = {
+  /** Called when reasoning/thinking content is received */
+  onReasoning?: (text: string) => void;
+  /** Called when assistant message content is received */
+  onAssistant?: (text: string) => void;
+  /** Called when tool result is received */
+  onToolResult?: (text: string) => void;
+};
 
 export async function runCliAgent(params: {
   sessionId: string;
@@ -50,6 +61,8 @@ export async function runCliAgent(params: {
   ownerNumbers?: string[];
   cliSessionId?: string;
   images?: ImageContent[];
+  /** Streaming callbacks for real-time output */
+  streamCallbacks?: CliAgentStreamCallbacks;
 }): Promise<EmbeddedPiRunResult> {
   const started = Date.now();
   const workspaceResolution = resolveRunWorkspaceDir({
@@ -233,11 +246,38 @@ export async function runCliAgent(params: {
         await cleanupResumeProcesses(backend, cliSessionIdToSend);
       }
 
+      // Set up streaming callbacks if provided
+      const streamCallbacks = params.streamCallbacks;
+      const onLineCallback = streamCallbacks
+        ? (line: string) => {
+            const event = parseCliJsonlLine(line, backend);
+            if (!event || !("text" in event)) {
+              return;
+            }
+            log.debug(
+              `[streaming] event type: ${event.type}, text: ${event.text?.substring(0, 50)}...`,
+            );
+            switch (event.type) {
+              case "thinking":
+                streamCallbacks.onReasoning?.(event.text);
+                break;
+              case "assistant":
+                streamCallbacks.onAssistant?.(event.text);
+                break;
+              case "tool_result":
+                streamCallbacks.onToolResult?.(event.text);
+                break;
+              // session_id and usage events are handled in final parse
+            }
+          }
+        : undefined;
+
       const result = await runCommandWithTimeout([backend.command, ...args], {
         timeoutMs: params.timeoutMs,
         cwd: workspaceDir,
         env,
         input: stdinPayload,
+        onLine: onLineCallback,
       });
 
       const stdout = result.stdout.trim();

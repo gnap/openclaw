@@ -227,14 +227,18 @@ export function createAgentEventHandler({
   clearAgentRunContext,
   toolEventRecipients,
 }: AgentEventHandlerOptions) {
-  const emitChatDelta = (sessionKey: string, clientRunId: string, seq: number, text: string) => {
-    chatRunState.buffers.set(clientRunId, text);
-    const now = Date.now();
-    const last = chatRunState.deltaSentAt.get(clientRunId) ?? 0;
-    if (now - last < 150) {
+  // Track pending flush deadlines per client run
+  const pendingFlushDeadlines = new Map<string, NodeJS.Timeout>();
+
+  const flushChatDelta = (sessionKey: string, clientRunId: string, seq: number) => {
+    const text = chatRunState.buffers.get(clientRunId);
+    if (!text) {
       return;
     }
-    chatRunState.deltaSentAt.set(clientRunId, now);
+    const now = Date.now();
+    console.log(
+      `[chat-delta] FLUSHING: runId=${clientRunId}, seq=${seq}, textLen=${text.length}, text=${text.substring(0, 50)}...`,
+    );
     const payload = {
       runId: clientRunId,
       sessionKey,
@@ -251,6 +255,55 @@ export function createAgentEventHandler({
       broadcast("chat", payload, { dropIfSlow: true });
     }
     nodeSendToSession(sessionKey, "chat", payload);
+    chatRunState.deltaSentAt.set(clientRunId, now);
+  };
+
+  const emitChatDelta = (sessionKey: string, clientRunId: string, seq: number, text: string) => {
+    const now = Date.now();
+    const last = chatRunState.deltaSentAt.get(clientRunId) ?? 0;
+    const timeSinceLastSend = now - last;
+
+    console.log(
+      `[chat-delta] received: runId=${clientRunId}, seq=${seq}, timeSinceLast=${timeSinceLastSend}, textLen=${text.length}, text=${text.substring(0, 30)}...`,
+    );
+
+    // Update buffer with new text
+    const existingText = chatRunState.buffers.get(clientRunId) ?? "";
+    chatRunState.buffers.set(clientRunId, existingText + text);
+
+    // If it's been too long since last send (deadline exceeded), flush immediately
+    if (timeSinceLastSend > 300) {
+      flushChatDelta(sessionKey, clientRunId, seq);
+      // Clear any pending deadline
+      const existingTimer = pendingFlushDeadlines.get(clientRunId);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
+        pendingFlushDeadlines.delete(clientRunId);
+      }
+      return;
+    }
+
+    // If within throttle window, just buffer (don't send yet)
+    if (timeSinceLastSend < 50) {
+      // Schedule a flush after deadline
+      const existingTimer = pendingFlushDeadlines.get(clientRunId);
+      if (!existingTimer) {
+        const timer = setTimeout(() => {
+          pendingFlushDeadlines.delete(clientRunId);
+          flushChatDelta(sessionKey, clientRunId, seq);
+        }, 50);
+        pendingFlushDeadlines.set(clientRunId, timer);
+      }
+      return;
+    }
+
+    // Otherwise, send now and schedule next deadline
+    flushChatDelta(sessionKey, clientRunId, seq);
+    const timer = setTimeout(() => {
+      pendingFlushDeadlines.delete(clientRunId);
+      flushChatDelta(sessionKey, clientRunId, seq);
+    }, 50);
+    pendingFlushDeadlines.set(clientRunId, timer);
   };
 
   const emitChatFinal = (
@@ -374,7 +427,18 @@ export function createAgentEventHandler({
       if (!isToolEvent || toolVerbose !== "off") {
         nodeSendToSession(sessionKey, "agent", isToolEvent ? toolPayload : agentPayload);
       }
+      // Handle assistant stream for real-time chat updates
       if (!isAborted && evt.stream === "assistant" && typeof evt.data?.text === "string") {
+        emitChatDelta(sessionKey, clientRunId, evt.seq, evt.data.text);
+      }
+      // Handle reasoning stream - emit as thinking content
+      else if (!isAborted && evt.stream === "reasoning" && typeof evt.data?.text === "string") {
+        // Emit reasoning as a delta (Feishu can display thinking if supported)
+        emitChatDelta(sessionKey, clientRunId, evt.seq, evt.data.text);
+      }
+      // Handle tool_result stream - emit as tool output
+      else if (!isAborted && evt.stream === "tool_result" && typeof evt.data?.text === "string") {
+        // Emit tool result as a delta
         emitChatDelta(sessionKey, clientRunId, evt.seq, evt.data.text);
       } else if (!isAborted && (lifecyclePhase === "end" || lifecyclePhase === "error")) {
         if (chatLink) {
@@ -413,6 +477,12 @@ export function createAgentEventHandler({
     if (lifecyclePhase === "end" || lifecyclePhase === "error") {
       toolEventRecipients.markFinal(evt.runId);
       clearAgentRunContext(evt.runId);
+      // Clean up pending deadline timers
+      const pendingTimer = pendingFlushDeadlines.get(evt.runId);
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+        pendingFlushDeadlines.delete(evt.runId);
+      }
     }
   };
 }

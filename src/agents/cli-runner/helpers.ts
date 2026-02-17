@@ -176,6 +176,124 @@ export type CliOutput = {
   usage?: CliUsage;
 };
 
+/** Streaming event from a single JSONL line */
+export type CliStreamEvent =
+  | { type: "thinking"; text: string }
+  | { type: "assistant"; text: string }
+  | { type: "tool_result"; text: string }
+  | { type: "session_id"; sessionId: string }
+  | { type: "usage"; usage: CliUsage }
+  | null;
+
+/** Parse a single JSONL line and emit streaming events */
+export function parseCliJsonlLine(line: string, backend: CliBackendConfig): CliStreamEvent {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+
+  if (!isRecord(parsed)) {
+    return null;
+  }
+
+  const msgType = typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
+
+  // Extract session ID
+  if (!parsed.session_id && typeof parsed.thread_id === "string") {
+    return { type: "session_id", sessionId: parsed.thread_id.trim() };
+  }
+
+  // Extract usage
+  if (isRecord(parsed.usage)) {
+    const usage = toUsage(parsed.usage);
+    if (usage) {
+      return { type: "usage", usage };
+    }
+  }
+
+  // Only process cursor-agent output
+  if (!backend.command.toLowerCase().includes("cursor")) {
+    return null;
+  }
+
+  // Thinking events
+  if (msgType === "thinking") {
+    const subtype = typeof parsed.subtype === "string" ? parsed.subtype.toLowerCase() : "";
+    if (subtype === "delta" && typeof parsed.text === "string") {
+      return { type: "thinking", text: parsed.text };
+    }
+    return null;
+  }
+
+  // Assistant events - extract text content
+  if (msgType === "assistant") {
+    const message = isRecord(parsed.message) ? parsed.message : null;
+    const content = message?.content;
+    const contentArray = Array.isArray(content) ? content : null;
+    const firstContent = contentArray?.[0];
+    if (isRecord(firstContent) && typeof firstContent.text === "string") {
+      return { type: "assistant", text: firstContent.text };
+    }
+    return null;
+  }
+
+  // Tool call events - extract tool result
+  if (msgType === "tool_call") {
+    const toolCall = isRecord(parsed.tool_call) ? parsed.tool_call : null;
+    const shellToolCall = isRecord(toolCall?.shellToolCall) ? toolCall.shellToolCall : null;
+    if (!shellToolCall) {
+      return null;
+    }
+
+    const args = isRecord(shellToolCall.args) ? shellToolCall.args : null;
+    const command = typeof args?.command === "string" ? args.command : null;
+    const result = isRecord(shellToolCall.result) ? shellToolCall.result : null;
+
+    if (!result) {
+      return null;
+    }
+
+    let output = "";
+    if (command) {
+      output += `$ ${command}\n`;
+    }
+
+    if (isRecord(result.success)) {
+      const stdout = typeof result.success.stdout === "string" ? result.success.stdout.trim() : "";
+      const stderr = typeof result.success.stderr === "string" ? result.success.stderr.trim() : "";
+      const exitCode = typeof result.success.exitCode === "number" ? result.success.exitCode : 0;
+
+      if (stdout) {
+        output += stdout;
+      }
+      if (stderr) {
+        output += (output ? "\n" : "") + `stderr: ${stderr}`;
+      }
+      output += `\n(exit code: ${exitCode})`;
+    } else if (isRecord(result.failure)) {
+      const stderr = typeof result.failure.stderr === "string" ? result.failure.stderr.trim() : "";
+      const exitCode = typeof result.failure.exitCode === "number" ? result.failure.exitCode : 1;
+      output += `Command failed (exit code: ${exitCode})`;
+      if (stderr) {
+        output += `\nstderr: ${stderr}`;
+      }
+    }
+
+    if (output) {
+      return { type: "tool_result", text: `\`\`\`\n${output}\n\`\`\`` };
+    }
+  }
+
+  return null;
+}
+
 function buildModelAliasLines(cfg?: OpenClawConfig) {
   const models = cfg?.agents?.defaults?.models ?? {};
   const entries: Array<{ alias: string; model: string }> = [];

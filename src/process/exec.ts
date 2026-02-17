@@ -76,6 +76,8 @@ export type CommandOptions = {
   input?: string;
   env?: NodeJS.ProcessEnv;
   windowsVerbatimArguments?: boolean;
+  /** Callback for each line of stdout (for streaming I/O) */
+  onLine?: (line: string) => void;
 };
 
 export async function runCommandWithTimeout(
@@ -84,7 +86,7 @@ export async function runCommandWithTimeout(
 ): Promise<SpawnResult> {
   const options: CommandOptions =
     typeof optionsOrTimeout === "number" ? { timeoutMs: optionsOrTimeout } : optionsOrTimeout;
-  const { timeoutMs, cwd, input, env } = options;
+  const { timeoutMs, cwd, input, env, onLine } = options;
   const { windowsVerbatimArguments } = options;
   const hasInput = input !== undefined;
 
@@ -117,6 +119,10 @@ export async function runCommandWithTimeout(
     env: resolvedEnv,
     windowsVerbatimArguments,
   });
+
+  // Buffer for streaming line handling
+  let lineBuffer = "";
+
   // Spawn with inherited stdin (TTY) so tools like `pi` stay interactive when needed.
   return await new Promise((resolve, reject) => {
     let stdout = "";
@@ -133,8 +139,30 @@ export async function runCommandWithTimeout(
       child.stdin.end();
     }
 
+    const flushLineBuffer = () => {
+      if (lineBuffer) {
+        const line = lineBuffer.trim();
+        if (line) {
+          if (onLine) {
+            onLine(line);
+          }
+        }
+        lineBuffer = "";
+      }
+    };
+
     child.stdout?.on("data", (d) => {
-      stdout += d.toString();
+      const chunk = d.toString();
+      stdout += chunk;
+
+      // Split into lines and process each
+      const parts = chunk.split(/\r?\n/);
+      for (let i = 0; i < parts.length - 1; i += 1) {
+        lineBuffer += parts[i];
+        flushLineBuffer();
+      }
+      // Keep last part in buffer (may be incomplete)
+      lineBuffer += parts[parts.length - 1];
     });
     child.stderr?.on("data", (d) => {
       stderr += d.toString();
@@ -148,6 +176,9 @@ export async function runCommandWithTimeout(
       reject(err);
     });
     child.on("close", (code, signal) => {
+      // Flush any remaining buffer
+      flushLineBuffer();
+
       if (settled) {
         return;
       }
