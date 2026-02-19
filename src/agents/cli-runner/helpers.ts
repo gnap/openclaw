@@ -647,6 +647,7 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
 
   // Current accumulation state
   let thinkingContent = "";
+  let thinkingStartTime: number | null = null; // Track when thinking started
   let assistantContent = "";
   let hasToolCall = false; // Track if we had any tool calls
 
@@ -726,6 +727,13 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
       const filePath = typeof args?.file_path === "string" ? args.file_path : null;
       const result = isRecord(readToolCall.result) ? readToolCall.result : null;
 
+      // DEBUG: log result structure
+      if (readToolCall && !result) {
+        log.info(
+          `[parseCliJsonl] readToolCall has no result, full keys=${Object.keys(readToolCall).join(", ")}`,
+        );
+      }
+
       if (result) {
         let output = "";
         if (filePath) {
@@ -778,6 +786,13 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
       const filePath = typeof args?.file_path === "string" ? args.file_path : null;
       const result = isRecord(editToolCall.result) ? editToolCall.result : null;
 
+      // DEBUG: log result structure
+      if (editToolCall && !result) {
+        log.info(
+          `[parseCliJsonl] editToolCall has no result, full keys=${Object.keys(editToolCall).join(", ")}`,
+        );
+      }
+
       if (result) {
         let output = "";
         if (filePath) {
@@ -790,6 +805,11 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
           output += `Error: ${result.error}`;
         } else if (result.success === true) {
           output += "File edited successfully";
+        } else {
+          // DEBUG: log unknown result format
+          log.info(
+            `[parseCliJsonl] editToolCall result has unknown format, keys=${Object.keys(result).join(", ")}`,
+          );
         }
 
         if (output) {
@@ -854,6 +874,10 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
     if (msgType === "thinking") {
       const subtype = typeof parsed.subtype === "string" ? parsed.subtype.toLowerCase() : "";
       if (subtype === "delta" && typeof parsed.text === "string") {
+        // Track start time on first thinking delta
+        if (thinkingStartTime === null) {
+          thinkingStartTime = Date.now();
+        }
         thinkingContent += parsed.text;
       }
       continue;
@@ -966,12 +990,14 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
     }
   }
 
-  // Finalize: flush remaining thinking at the beginning, assistant at the end
+  // Finalize: flush remaining thinking (show timing instead of content)
   const finalTexts: string[] = [];
 
-  // Add thinking first (if any)
-  if (thinkingContent.trim()) {
-    finalTexts.push(`\`\`\`thinking\n${thinkingContent.trim()}\n\`\`\``);
+  // Show thinking duration instead of full content
+  if (thinkingContent.trim() && thinkingStartTime !== null) {
+    const thinkingDurationMs = Date.now() - thinkingStartTime;
+    const thinkingDurationSec = (thinkingDurationMs / 1000).toFixed(1);
+    finalTexts.push(`🤔 Thinking for ${thinkingDurationSec}s`);
   }
 
   // Add all captured texts (assistant before tool + tool outputs)

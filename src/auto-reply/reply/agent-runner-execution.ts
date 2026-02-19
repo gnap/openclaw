@@ -194,13 +194,13 @@ export async function runAgentTurnWithFallback(params: {
                   ownerNumbers: params.followupRun.run.ownerNumbers,
                   cliSessionId,
                   images: params.opts?.images,
-                  // Pass streaming callbacks for real-time output
-                  // Note: We emit events via emitAgentEvent which goes to chat-delta (web UI).
-                  // The final payloads will be sent separately to Feishu.
-                  // We DON'T track streaming chars - streaming goes to web UI, final goes to Feishu
+                  // Pass streaming callbacks for real-time output to Web UI
+                  // NOTE: streaming goes to chat-delta (Web UI), NOT to Feishu
+                  // Final delivery still goes to Feishu via reply pipeline
+                  // So we always return 0 to NOT skip final delivery
                   streamCallbacks: (() => {
                     return {
-                      // Always return 0 - streaming goes to web UI, final payloads go to Feishu
+                      // Always return 0 - streaming goes to Web UI, final goes to Feishu
                       flushAndGetSentCount: () => {
                         return 0;
                       },
@@ -234,8 +234,7 @@ export async function runAgentTurnWithFallback(params: {
                   })(),
                 });
 
-                // Emit final assistant message as fallback (in case streaming didn't emit anything)
-                // Also emit it if there's additional text in the result beyond what was streamed
+                // Emit final assistant message (for Web UI)
                 const cliText = result.payloads?.[0]?.text?.trim();
                 if (cliText) {
                   emitAgentEvent({
