@@ -675,6 +675,7 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
   const _texts: string[] = [];
   const toolOutputs: string[] = []; // Tool outputs - separate from assistant
   const assistantTexts: string[] = []; // Assistant content - separate from tools
+  let lastResultText: string | undefined; // Track the result text to avoid duplicates in finalize
 
   // Current accumulation state
   let thinkingContent = "";
@@ -947,12 +948,16 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
       const text = extractAssistantText(parsed);
       if (typeof text === "string" && text.trim()) {
         const currentKey = parsed.model_call_id as string | undefined;
+        log.info(
+          `[parseCliJsonl] assistant event: text_len=${text.length}, currentKey=${currentKey ?? "none"}, assistantContent_len=${assistantContent.length}`,
+        );
 
         // Check if this is a consolidated message (has model_call_id)
         // Consolidated messages replace accumulated content, not append
         if (currentKey) {
           // This is a consolidated message - replace accumulated content
           assistantContent = text;
+          log.info(`[parseCliJsonl] assistant: replaced content with consolidated message`);
         } else {
           // This is a delta message - accumulate it
           // Check if we already have content and if so, check for consolidation
@@ -961,8 +966,10 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
             (text.includes(assistantContent) || assistantContent.includes(text))
           ) {
             // Already have this content, skip to avoid duplicates
+            log.info(`[parseCliJsonl] assistant: skipping duplicate delta`);
           } else {
             assistantContent += text;
+            log.info(`[parseCliJsonl] assistant: accumulated, new len=${assistantContent.length}`);
           }
         }
       }
@@ -982,6 +989,9 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
 
       // Only flush assistant content for shell tool calls (user commands)
       // Skip flushing for read tool calls (workspace file reads are preparation, not response)
+      log.info(
+        `[parseCliJsonl] tool_call completed: assistantContent_len=${assistantContent.length}, isShellTool=${isShellTool}`,
+      );
       if (assistantContent.trim() && isShellTool) {
         const assistantGroup = getOrCreateAssistantGroup();
         assistantGroup.texts.push(assistantContent.trim());
@@ -1053,6 +1063,7 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
         const assistantGroup = getOrCreateAssistantGroup();
         assistantGroup.texts.push(parsed.result);
         assistantTexts.push(parsed.result);
+        lastResultText = parsed.result.trim();
         log.info(
           `[parseCliJsonl] result added to assistant group, group_id=${messageGroups.length - 1}`,
         );
@@ -1071,12 +1082,22 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
 
   // Flush any remaining assistant content after the last tool call
   // This handles the case where the final assistant message comes after the last tool
-  if (assistantContent.trim()) {
+  // BUT only if we haven't already added the result (to avoid duplicates)
+  const hasResultText = lastResultText
+    ? messageGroups.some(
+        (g) => g.type === "assistant" && g.texts.some((t) => t.includes(lastResultText!)),
+      )
+    : false;
+  if (assistantContent.trim() && !hasResultText) {
     const assistantGroup = getOrCreateAssistantGroup();
     assistantGroup.texts.push(assistantContent.trim());
     assistantTexts.push(assistantContent.trim());
     log.info(
       `[parseCliJsonl] flushed remaining assistantContent in finalize, length=${assistantContent.length}`,
+    );
+  } else if (assistantContent.trim() && hasResultText) {
+    log.info(
+      `[parseCliJsonl] skipping duplicate assistantContent in finalize (result already added), length=${assistantContent.length}`,
     );
   }
 
