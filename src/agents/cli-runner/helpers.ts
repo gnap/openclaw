@@ -816,6 +816,11 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
       const filePath = typeof args?.file_path === "string" ? args.file_path : null;
       const result = isRecord(editToolCall.result) ? editToolCall.result : null;
 
+      // DEBUG: log full result structure including success type
+      log.info(
+        `[parseCliJsonl] editToolCall: argsKeys=${args ? Object.keys(args).join(", ") : "none"}, resultKeys=${result ? Object.keys(result).join(", ") : "none"}, resultSuccessType=${result ? typeof result.success : "N/A"}, resultSuccessValue=${result ? JSON.stringify(result.success) : "N/A"}`,
+      );
+
       // DEBUG: log result structure
       if (editToolCall && !result) {
         log.info(
@@ -829,16 +834,40 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
           output += `# ${filePath}\n`;
         }
 
-        if (typeof result.success === "string") {
-          output += result.success;
-        } else if (typeof result.error === "string") {
+        // Handle various result formats
+        const successVal = result?.success;
+        if (typeof successVal === "string" && successVal) {
+          output += successVal;
+        } else if (typeof result?.error === "string") {
           output += `Error: ${result.error}`;
-        } else if (result.success === true) {
+        } else if (successVal === true) {
           output += "File edited successfully";
+        } else if (successVal === false) {
+          output += "File edit failed";
+        } else if (typeof successVal === "object" && successVal !== null) {
+          // Handle object format: { path, linesAdded, linesRemoved, diffString, ... }
+          const editResult = successVal as Record<string, unknown>;
+          if (editResult.path) {
+            output += `# ${editResult.path}\n`;
+          }
+          if (
+            typeof editResult.linesAdded === "number" &&
+            typeof editResult.linesRemoved === "number"
+          ) {
+            output += `+${editResult.linesAdded} -${editResult.linesRemoved}\n`;
+          }
+          if (typeof editResult.diffString === "string") {
+            output += editResult.diffString;
+          } else {
+            output += JSON.stringify(editResult, null, 2);
+          }
+        } else if (successVal !== undefined) {
+          // Handle other truthy values
+          output += String(successVal);
         } else {
           // DEBUG: log unknown result format
           log.info(
-            `[parseCliJsonl] editToolCall result has unknown format, keys=${Object.keys(result).join(", ")}`,
+            `[parseCliJsonl] editToolCall result has unknown format, keys=${Object.keys(result).join(", ")}, successVal=${successVal}, successType=${typeof successVal}`,
           );
         }
 
@@ -1015,10 +1044,18 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
           (resultTrimmed.includes(lastAssistantText.trim()) &&
             Math.abs(resultTrimmed.length - lastAssistantText.trim().length) < 100));
 
+      // DEBUG: log duplicate check details
+      log.info(
+        `[parseCliJsonl] result duplicate check: lastAssistantText_len=${lastAssistantText.length}, result_len=${resultTrimmed.length}, isDuplicate=${isDuplicate}, toolOutputs_len=${toolOutputs.length}`,
+      );
+
       if (!isDuplicate) {
         const assistantGroup = getOrCreateAssistantGroup();
         assistantGroup.texts.push(parsed.result);
         assistantTexts.push(parsed.result);
+        log.info(
+          `[parseCliJsonl] result added to assistant group, group_id=${messageGroups.length - 1}`,
+        );
       } else {
         log.info(`[parseCliJsonl] skipping duplicate result text`);
       }
