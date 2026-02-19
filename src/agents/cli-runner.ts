@@ -356,20 +356,80 @@ export async function runCliAgent(params: {
     }
 
     const text = output.text?.trim();
+
+    // DEBUG: Log what parseCliJsonl returned - show all texts
+    if (output.texts && output.texts.length > 0) {
+      log.info(`[cli-streaming] parseCliJsonl returned texts: count=${output.texts.length}`);
+      for (let i = 0; i < output.texts.length; i++) {
+        const t = output.texts[i];
+        log.info(
+          `[cli-streaming] text[${i}] length=${t.length}, preview=${t.slice(0, 150).replace(/\n/g, "\\n")}`,
+        );
+      }
+    }
+
     // Support both single text and multiple texts (for tool call outputs)
     let payloads;
     if (output.texts && output.texts.length > 0) {
-      // Deduplicate texts to avoid sending the same content multiple times
+      // Deduplicate texts - first exact match, then subset match (keep longer version)
       const seen = new Set<string>();
-      const uniqueTexts = output.texts.filter((t) => {
+      const uniqueTexts: string[] = [];
+      for (const t of output.texts) {
         const trimmed = t.trim();
-        if (!trimmed || seen.has(trimmed)) {
-          return false;
+        if (!trimmed) {
+          log.info(`[cli-streaming] skipping empty text`);
+          continue;
         }
+        if (seen.has(trimmed)) {
+          // DEBUG: Log which text was deduplicated
+          log.info(`[cli-streaming] deduplicated exact match: length=${trimmed.length}`);
+          continue;
+        }
+
+        // Check if this text is a subset of any existing text (keep longer version)
+        const isSubset = uniqueTexts.some((existing) => {
+          const existingTrimmed = existing.trim();
+          return existingTrimmed.includes(trimmed) && existingTrimmed.length > trimmed.length;
+        });
+        if (isSubset) {
+          log.info(
+            `[cli-streaming] deduplicated subset: ${trimmed.length} chars is contained in longer text`,
+          );
+          continue;
+        }
+
+        // Check if any existing text is a subset of this text (new text is longer, replace shorter)
+        const existingIsSubset = uniqueTexts.findIndex((existing) => {
+          const existingTrimmed = existing.trim();
+          return trimmed.includes(existingTrimmed) && trimmed.length > existingTrimmed.length;
+        });
+        if (existingIsSubset !== -1) {
+          const removed = uniqueTexts.splice(existingIsSubset, 1)[0];
+          log.info(
+            `[cli-streaming] deduplicated: replaced shorter text (${removed.trim().length} chars) with longer (${trimmed.length} chars)`,
+          );
+        }
+
         seen.add(trimmed);
-        return true;
-      });
-      payloads = uniqueTexts.map((t) => ({ text: t.trim() })).filter((p) => p.text);
+        uniqueTexts.push(t);
+      }
+
+      // DEBUG: Log unique texts
+      log.info(`[cli-streaming] unique texts after dedup: count=${uniqueTexts.length}`);
+
+      // Combine all unique texts into a single payload to avoid multiple messages
+      const combinedText = uniqueTexts.join("\n\n");
+
+      // DEBUG: Log combined text length
+      log.info(
+        `[cli-streaming] combined text length: ${combinedText.length}, preview: ${combinedText.slice(0, 100)}`,
+      );
+
+      if (combinedText) {
+        payloads = [{ text: combinedText }];
+      } else {
+        payloads = [];
+      }
     } else if (text) {
       payloads = [{ text }];
     }

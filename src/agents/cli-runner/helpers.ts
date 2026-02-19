@@ -8,6 +8,7 @@ import type { ThinkLevel } from "../../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { CliBackendConfig } from "../../config/types.js";
 import type { EmbeddedContextFile } from "../pi-embedded-helpers.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { runExec } from "../../process/exec.js";
 import { buildTtsSystemPromptHint } from "../../tts/tts.js";
 import { escapeRegExp, isRecord } from "../../utils.js";
@@ -15,6 +16,8 @@ import { resolveDefaultModelForAgent } from "../model-selection.js";
 import { detectRuntimeShell } from "../shell-utils.js";
 import { buildSystemPromptParams } from "../system-prompt-params.js";
 import { buildAgentSystemPrompt } from "../system-prompt.js";
+
+const log = createSubsystemLogger("agent/cli-runner/helpers");
 
 const CLI_RUN_QUEUE = new Map<string, Promise<unknown>>();
 
@@ -319,20 +322,15 @@ export function parseCliJsonlLine(line: string, backend: CliBackendConfig): CliS
       const filePath = typeof args?.file_path === "string" ? args.file_path : null;
       const result = isRecord(readToolCall.result) ? readToolCall.result : null;
 
-      if (result) {
-        let output = "";
-        if (filePath) {
-          output += `# ${filePath}\n`;
-        }
+      if (result && filePath) {
+        // Extract relative path from absolute path
+        const relativePath = filePath.replace(/^.*\//, "");
 
         if (typeof result.content === "string") {
-          output += result.content;
+          const lines = result.content.split("\n").length;
+          return { type: "tool_result", text: `📄 ${relativePath} (${lines} lines)` };
         } else if (typeof result.error === "string") {
-          output += `Error: ${result.error}`;
-        }
-
-        if (output) {
-          return { type: "tool_result", text: `\`\`\`\n${output}\n\`\`\`` };
+          return { type: "tool_result", text: `📄 ${relativePath}: Error - ${result.error}` };
         }
       }
     }
@@ -344,22 +342,18 @@ export function parseCliJsonlLine(line: string, backend: CliBackendConfig): CliS
       const filePath = typeof args?.file_path === "string" ? args.file_path : null;
       const result = isRecord(writeToolCall.result) ? writeToolCall.result : null;
 
-      if (result) {
-        let output = "";
-        if (filePath) {
-          output += `# ${filePath}\n`;
-        }
+      if (result && filePath) {
+        // Extract relative path from absolute path
+        const relativePath = filePath.replace(/^.*\//, "");
 
         if (typeof result.success === "string") {
-          output += result.success;
+          // Try to parse diff stats from success message
+          const lines = result.success.split("\n").length;
+          return { type: "tool_result", text: `📝 ${relativePath} (+${lines} lines)` };
         } else if (typeof result.error === "string") {
-          output += `Error: ${result.error}`;
+          return { type: "tool_result", text: `📝 ${relativePath}: Error - ${result.error}` };
         } else if (result.success === true) {
-          output += "File written successfully";
-        }
-
-        if (output) {
-          return { type: "tool_result", text: `\`\`\`\n${output}\n\`\`\`` };
+          return { type: "tool_result", text: `📝 ${relativePath} (written)` };
         }
       }
     }
@@ -371,22 +365,18 @@ export function parseCliJsonlLine(line: string, backend: CliBackendConfig): CliS
       const filePath = typeof args?.file_path === "string" ? args.file_path : null;
       const result = isRecord(editToolCall.result) ? editToolCall.result : null;
 
-      if (result) {
-        let output = "";
-        if (filePath) {
-          output += `# ${filePath}\n`;
-        }
+      if (result && filePath) {
+        // Extract relative path from absolute path
+        const relativePath = filePath.replace(/^.*\//, "");
 
         if (typeof result.success === "string") {
-          output += result.success;
+          // Try to extract diff stats from the success message
+          // Format could be like "Applied edit to file.js: +10 -5 lines" or similar
+          return { type: "tool_result", text: `✏️ ${relativePath}: ${result.success}` };
         } else if (typeof result.error === "string") {
-          output += `Error: ${result.error}`;
+          return { type: "tool_result", text: `✏️ ${relativePath}: Error - ${result.error}` };
         } else if (result.success === true) {
-          output += "File edited successfully";
-        }
-
-        if (output) {
-          return { type: "tool_result", text: `\`\`\`\n${output}\n\`\`\`` };
+          return { type: "tool_result", text: `✏️ ${relativePath} (edited)` };
         }
       }
     }
@@ -394,10 +384,26 @@ export function parseCliJsonlLine(line: string, backend: CliBackendConfig): CliS
     // Try search files tool call
     const searchToolCall = isRecord(toolCall?.searchToolCall) ? toolCall.searchToolCall : null;
     if (searchToolCall) {
+      const args = isRecord(searchToolCall.args) ? searchToolCall.args : null;
       const result = isRecord(searchToolCall.result) ? searchToolCall.result : null;
 
       if (result && typeof result.results === "string") {
-        return { type: "tool_result", text: `\`\`\`\n${result.results}\n\`\`\`` };
+        // Show file count and match count instead of full results
+        const lines = result.results.split("\n").filter((l: string) => l.trim());
+        const fileMatches = new Set<string>();
+        for (const line of lines) {
+          // Try to extract file path from search result lines
+          const match = line.match(/^([^:]+):/);
+          if (match) {
+            fileMatches.add(match[1].replace(/^.*\//, ""));
+          }
+        }
+        const matchCount = lines.length;
+        const fileCount = fileMatches.size;
+        return {
+          type: "tool_result",
+          text: `🔍 Search: ${fileCount} files, ${matchCount} matches`,
+        };
       }
     }
   }
@@ -658,6 +664,12 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
   const extractToolOutput = (parsed: Record<string, unknown>): string | null => {
     const toolCall = isRecord(parsed.tool_call) ? parsed.tool_call : null;
 
+    // DEBUG: Log all tool call keys
+    if (toolCall) {
+      const keys = Object.keys(toolCall).join(", ");
+      log.info(`[parseCliJsonl] extractToolOutput: toolCall keys=${keys}`);
+    }
+
     // Try shell tool call first
     const shellToolCall = isRecord(toolCall?.shellToolCall) ? toolCall.shellToolCall : null;
     if (shellToolCall) {
@@ -667,6 +679,7 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
 
       const result = isRecord(shellToolCall.result) ? shellToolCall.result : null;
       if (!result) {
+        log.info(`[parseCliJsonl] extractToolOutput: shellToolCall has no result`);
         return null;
       }
 
@@ -676,10 +689,8 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
         const stderr =
           typeof result.success.stderr === "string" ? result.success.stderr.trim() : "";
         const exitCode = typeof result.success.exitCode === "number" ? result.success.exitCode : 0;
-        if (!stdout && !stderr) {
-          return null;
-        }
 
+        // Always capture command result - even if no stdout/stderr, show exit code
         let output = "";
         if (command) {
           output += `$ ${command}\n`;
@@ -798,6 +809,12 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
       }
     }
 
+    // DEBUG: Log unknown tool type
+    if (toolCall && Object.keys(toolCall).length > 0) {
+      const keys = Object.keys(toolCall).join(", ");
+      log.info(`[parseCliJsonl] extractToolOutput returning null: unknown tool type, keys=${keys}`);
+    }
+
     return null;
   };
 
@@ -814,6 +831,13 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
 
     const msgType = typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
     const toolSubtype = typeof parsed.subtype === "string" ? parsed.subtype.toLowerCase() : "";
+
+    // DEBUG: Log all tool_call events with their subtypes
+    if (msgType === "tool_call") {
+      log.info(
+        `[parseCliJsonl] tool_call event: subtype=${toolSubtype}, hasToolCall=${!!parsed.tool_call}`,
+      );
+    }
 
     if (!sessionId) {
       sessionId = pickSessionId(parsed, backend);
@@ -870,10 +894,17 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
       const toolCall = isRecord(parsed.tool_call) ? parsed.tool_call : null;
       const isShellTool = isRecord(toolCall?.shellToolCall);
 
+      // DEBUG: Log tool call type
+      const toolKeys = toolCall ? Object.keys(toolCall).join(", ") : "none";
+      log.info(
+        `[parseCliJsonl] tool_call completed: isShellTool=${isShellTool}, toolKeys=${toolKeys}`,
+      );
+
       // Only flush assistant content for shell tool calls (user commands)
       // Skip flushing for read tool calls (workspace file reads are preparation, not response)
       if (assistantContent.trim() && isShellTool) {
         texts.push(assistantContent.trim());
+        log.info(`[parseCliJsonl] pushed assistant content, texts.length=${texts.length}`);
       }
 
       // Only clear assistant content for shell tool calls, not for read tools
@@ -886,25 +917,50 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
       const toolOutput = extractToolOutput(parsed);
       if (toolOutput) {
         texts.push(toolOutput);
+        log.info(
+          `[parseCliJsonl] pushed tool output, texts.length=${texts.length}, preview=${toolOutput.slice(0, 80).replace(/\n/g, "\\n")}`,
+        );
+      } else {
+        log.info(`[parseCliJsonl] tool output is null, toolCall=${toolKeys}`);
       }
       continue;
     }
 
     // Result: final consolidated output
-    // Only add if we haven't captured any content yet (no tool calls)
+    // Always include the final result (it may contain a summary after tool calls)
     if (msgType === "result" && typeof parsed.result === "string") {
+      const resultPreview =
+        parsed.result.length > 80
+          ? parsed.result.slice(0, 80).replace(/\n/g, "\\n") + "..."
+          : parsed.result.replace(/\n/g, "\\n");
+      log.info(
+        `[parseCliJsonl] result event: texts.length=${texts.length}, resultPreview=${resultPreview}`,
+      );
+
       // Only flush remaining assistant content if we have no tool output
       // (assistant content after tool call is not useful)
       if (assistantContent.trim() && texts.length === 0) {
         texts.push(assistantContent.trim());
       }
-      // Don't clear assistantContent here - let the final flush capture it
-      // assistantContent = "";
 
-      // Only add result if we haven't captured any tool output
-      if (texts.length === 0) {
+      // Check if result is duplicate of last text (avoid sending same content twice)
+      const lastText = texts.length > 0 ? texts[texts.length - 1] : "";
+      const resultTrimmed = parsed.result.trim();
+
+      // Only add result if it's substantially different from the last text
+      // (use length difference as a heuristic - if lengths are very different, it's different content)
+      const isDuplicate =
+        lastText &&
+        (resultTrimmed === lastText.trim() ||
+          (resultTrimmed.includes(lastText.trim()) &&
+            Math.abs(resultTrimmed.length - lastText.trim().length) < 100));
+
+      if (!isDuplicate) {
         texts.push(parsed.result);
+      } else {
+        log.info(`[parseCliJsonl] skipping duplicate result text`);
       }
+
       // Clear thinking content
       thinkingContent = "";
       continue;
@@ -927,13 +983,43 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
   }
 
   // Add remaining assistant content if we had tool calls
-  // (tool_call completed flushes before tool, but there may be assistant after tool)
+  // Check for duplicates to avoid repeated content
   if (assistantContent.trim() && hasToolCall) {
-    finalTexts.push(assistantContent.trim());
+    const assistantTrimmed = assistantContent.trim();
+    // Skip if this content is already in finalTexts
+    const isDuplicate = finalTexts.some(
+      (t) => t.trim() === assistantTrimmed || t.includes(assistantTrimmed),
+    );
+    if (!isDuplicate) {
+      finalTexts.push(assistantTrimmed);
+    }
   }
 
-  if (finalTexts.length > 0) {
-    return { texts: finalTexts, sessionId, usage };
+  // Final dedup: remove texts where one is a subset of another (keep the longer one)
+  const deduplicated: string[] = [];
+  for (const text of finalTexts) {
+    const trimmed = text.trim();
+    // Skip if this text is already contained in any existing text (keep longer version)
+    const isSubset = deduplicated.some(
+      (existing) => existing.trim().includes(trimmed) && existing.trim().length > trimmed.length,
+    );
+    if (isSubset) {
+      continue;
+    }
+
+    // If any existing text is a subset of this text (new text is longer), replace the shorter
+    const existingIdx = deduplicated.findIndex(
+      (existing) => trimmed.includes(existing.trim()) && trimmed.length > existing.trim().length,
+    );
+    if (existingIdx !== -1) {
+      deduplicated.splice(existingIdx, 1);
+    }
+
+    deduplicated.push(text);
+  }
+
+  if (deduplicated.length > 0) {
+    return { texts: deduplicated, sessionId, usage };
   }
 
   return null;

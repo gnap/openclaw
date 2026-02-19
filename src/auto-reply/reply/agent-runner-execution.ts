@@ -195,19 +195,14 @@ export async function runAgentTurnWithFallback(params: {
                   cliSessionId,
                   images: params.opts?.images,
                   // Pass streaming callbacks for real-time output
-                  // Also call dispatcher's callbacks to send to channels (e.g., Feishu)
-                  // Use buffering to avoid over-segmentation (multiple small messages)
+                  // Note: We emit events via emitAgentEvent which goes to chat-delta (web UI).
+                  // The final payloads will be sent separately to Feishu.
+                  // We DON'T track streaming chars - streaming goes to web UI, final goes to Feishu
                   streamCallbacks: (() => {
-                    const dispatchToolResult = params.opts?.onToolResult;
-
-                    // Track if assistant content was sent via streaming to avoid duplicates in final send
-                    let assistantSentViaStreaming = false;
-
                     return {
-                      // Return count of chars sent via streaming to channel
-                      // Only count assistant content (not tool results) to avoid duplicate prevention
+                      // Always return 0 - streaming goes to web UI, final payloads go to Feishu
                       flushAndGetSentCount: () => {
-                        return assistantSentViaStreaming ? 1 : 0;
+                        return 0;
                       },
                       onReasoning: (text) => {
                         logVerbose(`[streaming] emitting reasoning: ${text?.substring(0, 30)}...`);
@@ -224,8 +219,6 @@ export async function runAgentTurnWithFallback(params: {
                           stream: "assistant",
                           data: { text },
                         });
-                        // TODO: If we want real-time assistant streaming in the future,
-                        // we would call dispatch here and set assistantSentViaStreaming = true
                       },
                       onToolResult: (text) => {
                         logVerbose(
@@ -236,18 +229,6 @@ export async function runAgentTurnWithFallback(params: {
                           stream: "tool_result",
                           data: { text },
                         });
-                        // Send tool result immediately for real-time feedback
-                        // Tool results don't cause duplicate issues since final payload has different content
-                        if (dispatchToolResult && text) {
-                          const payload = { text };
-                          const result = dispatchToolResult(payload);
-                          if (result && typeof result.then === "function") {
-                            result.catch((err: unknown) =>
-                              logVerbose(`dispatchToolResult failed: ${String(err)}`),
-                            );
-                          }
-                          // Don't set assistantSentViaStreaming here - tool results are not duplicates
-                        }
                       },
                     };
                   })(),
