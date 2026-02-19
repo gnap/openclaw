@@ -672,7 +672,7 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
   };
 
   // Legacy arrays for backward compatibility
-  const texts: string[] = [];
+  const _texts: string[] = [];
   const toolOutputs: string[] = []; // Tool outputs - separate from assistant
   const assistantTexts: string[] = []; // Assistant content - separate from tools
 
@@ -680,7 +680,6 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
   let thinkingContent = "";
   let thinkingStartTime: number | null = null; // Track when thinking started
   let assistantContent = "";
-  let hasToolCall = false; // Track if we had any tool calls
 
   // Helper to extract text from assistant message
   const extractAssistantText = (parsed: Record<string, unknown>): string | null => {
@@ -943,8 +942,6 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
 
     // Tool call completed: flush assistant, add tool output
     if (msgType === "tool_call" && toolSubtype === "completed") {
-      hasToolCall = true;
-
       const toolCall = isRecord(parsed.tool_call) ? parsed.tool_call : null;
       const isShellTool = isRecord(toolCall?.shellToolCall);
 
