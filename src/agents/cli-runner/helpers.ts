@@ -175,6 +175,12 @@ type CliUsage = {
 export type CliOutput = {
   text?: string;
   texts?: string[];
+  /** Tool outputs - each as separate message */
+  toolOutputs?: string[];
+  /** Assistant texts - final response, separate from tool outputs */
+  assistantTexts?: string[];
+  /** Message groups in chronological order - preserves tool/assistant sequence */
+  messageGroups?: { type: "tool" | "assistant"; texts: string[] }[];
   sessionId?: string;
   usage?: CliUsage;
 };
@@ -642,8 +648,33 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
   let sessionId: string | undefined;
   let usage: CliUsage | undefined;
 
-  // Output message blocks in chronological order
+  // Message groups in chronological order - preserves tool/assistant sequence
+  // Each tool output becomes a separate group, assistant texts between tools can be merged
+  const messageGroups: { type: "tool" | "assistant"; texts: string[] }[] = [];
+
+  // Current group we're adding to
+  let currentGroup: { type: "tool" | "assistant"; texts: string[] } | null = null;
+
+  // Helper to get or create current assistant group
+  const getOrCreateAssistantGroup = (): { type: "tool" | "assistant"; texts: string[] } => {
+    if (!currentGroup || currentGroup.type !== "assistant") {
+      currentGroup = { type: "assistant", texts: [] };
+      messageGroups.push(currentGroup);
+    }
+    return currentGroup;
+  };
+
+  // Helper to start a new tool group
+  const startToolGroup = (): { type: "tool" | "assistant"; texts: string[] } => {
+    currentGroup = { type: "tool", texts: [] };
+    messageGroups.push(currentGroup);
+    return currentGroup;
+  };
+
+  // Legacy arrays for backward compatibility
   const texts: string[] = [];
+  const toolOutputs: string[] = []; // Tool outputs - separate from assistant
+  const assistantTexts: string[] = []; // Assistant content - separate from tools
 
   // Current accumulation state
   let thinkingContent = "";
@@ -926,8 +957,12 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
       // Only flush assistant content for shell tool calls (user commands)
       // Skip flushing for read tool calls (workspace file reads are preparation, not response)
       if (assistantContent.trim() && isShellTool) {
-        texts.push(assistantContent.trim());
-        log.info(`[parseCliJsonl] pushed assistant content, texts.length=${texts.length}`);
+        const assistantGroup = getOrCreateAssistantGroup();
+        assistantGroup.texts.push(assistantContent.trim());
+        assistantTexts.push(assistantContent.trim());
+        log.info(
+          `[parseCliJsonl] pushed assistant content to group, assistantGroup.texts.length=${assistantGroup.texts.length}`,
+        );
       }
 
       // Only clear assistant content for shell tool calls, not for read tools
@@ -936,12 +971,14 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
         assistantContent = "";
       }
 
-      // Add tool output
+      // Add tool output - start a new tool group
       const toolOutput = extractToolOutput(parsed);
       if (toolOutput) {
-        texts.push(toolOutput);
+        const toolGroup = startToolGroup();
+        toolGroup.texts.push(toolOutput);
+        toolOutputs.push(toolOutput);
         log.info(
-          `[parseCliJsonl] pushed tool output, texts.length=${texts.length}, preview=${toolOutput.slice(0, 80).replace(/\n/g, "\\n")}`,
+          `[parseCliJsonl] pushed tool output to new group, toolOutputs.length=${toolOutputs.length}, preview=${toolOutput.slice(0, 80).replace(/\n/g, "\\n")}`,
         );
       } else {
         log.info(`[parseCliJsonl] tool output is null, toolCall=${toolKeys}`);
@@ -957,29 +994,34 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
           ? parsed.result.slice(0, 80).replace(/\n/g, "\\n") + "..."
           : parsed.result.replace(/\n/g, "\\n");
       log.info(
-        `[parseCliJsonl] result event: texts.length=${texts.length}, resultPreview=${resultPreview}`,
+        `[parseCliJsonl] result event: toolOutputs.length=${toolOutputs.length}, assistantTexts.length=${assistantTexts.length}, resultPreview=${resultPreview}`,
       );
 
       // Only flush remaining assistant content if we have no tool output
       // (assistant content after tool call is not useful)
-      if (assistantContent.trim() && texts.length === 0) {
-        texts.push(assistantContent.trim());
+      if (assistantContent.trim() && toolOutputs.length === 0) {
+        const assistantGroup = getOrCreateAssistantGroup();
+        assistantGroup.texts.push(assistantContent.trim());
+        assistantTexts.push(assistantContent.trim());
       }
 
-      // Check if result is duplicate of last text (avoid sending same content twice)
-      const lastText = texts.length > 0 ? texts[texts.length - 1] : "";
+      // Check if result is duplicate of last assistant text (avoid sending same content twice)
+      const lastAssistantText =
+        assistantTexts.length > 0 ? assistantTexts[assistantTexts.length - 1] : "";
       const resultTrimmed = parsed.result.trim();
 
-      // Only add result if it's substantially different from the last text
+      // Only add result if it's substantially different from the last assistant text
       // (use length difference as a heuristic - if lengths are very different, it's different content)
       const isDuplicate =
-        lastText &&
-        (resultTrimmed === lastText.trim() ||
-          (resultTrimmed.includes(lastText.trim()) &&
-            Math.abs(resultTrimmed.length - lastText.trim().length) < 100));
+        lastAssistantText &&
+        (resultTrimmed === lastAssistantText.trim() ||
+          (resultTrimmed.includes(lastAssistantText.trim()) &&
+            Math.abs(resultTrimmed.length - lastAssistantText.trim().length) < 100));
 
       if (!isDuplicate) {
-        texts.push(parsed.result);
+        const assistantGroup = getOrCreateAssistantGroup();
+        assistantGroup.texts.push(parsed.result);
+        assistantTexts.push(parsed.result);
       } else {
         log.info(`[parseCliJsonl] skipping duplicate result text`);
       }
@@ -1000,51 +1042,37 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
     finalTexts.push(`🤔 Thinking for ${thinkingDurationSec}s`);
   }
 
-  // Add all captured texts (assistant before tool + tool outputs)
-  for (const text of texts) {
-    if (text.trim()) {
-      finalTexts.push(text.trim());
+  // Build finalTexts from messageGroups for backward compatibility
+  // Each group becomes one text (tool = single, assistant = joined)
+  for (const group of messageGroups) {
+    if (group.type === "tool") {
+      // Tool outputs: each tool is a separate entry
+      for (const text of group.texts) {
+        if (text.trim()) {
+          finalTexts.push(text.trim());
+        }
+      }
+    } else {
+      // Assistant texts: merge texts within the group
+      const joined = group.texts.join("\n\n");
+      if (joined.trim()) {
+        finalTexts.push(joined.trim());
+      }
     }
   }
 
-  // Add remaining assistant content if we had tool calls
-  // Check for duplicates to avoid repeated content
-  if (assistantContent.trim() && hasToolCall) {
-    const assistantTrimmed = assistantContent.trim();
-    // Skip if this content is already in finalTexts
-    const isDuplicate = finalTexts.some(
-      (t) => t.trim() === assistantTrimmed || t.includes(assistantTrimmed),
+  // Debug log message groups
+  log.info(`[parseCliJsonl] final messageGroups: count=${messageGroups.length}`);
+  for (let i = 0; i < messageGroups.length; i++) {
+    const g = messageGroups[i];
+    const preview = g.texts.join(" | ").slice(0, 100).replace(/\n/g, "\\n");
+    log.info(
+      `[parseCliJsonl] group[${i}]: type=${g.type}, textsCount=${g.texts.length}, preview=${preview}...`,
     );
-    if (!isDuplicate) {
-      finalTexts.push(assistantTrimmed);
-    }
   }
 
-  // Final dedup: remove texts where one is a subset of another (keep the longer one)
-  const deduplicated: string[] = [];
-  for (const text of finalTexts) {
-    const trimmed = text.trim();
-    // Skip if this text is already contained in any existing text (keep longer version)
-    const isSubset = deduplicated.some(
-      (existing) => existing.trim().includes(trimmed) && existing.trim().length > trimmed.length,
-    );
-    if (isSubset) {
-      continue;
-    }
-
-    // If any existing text is a subset of this text (new text is longer), replace the shorter
-    const existingIdx = deduplicated.findIndex(
-      (existing) => trimmed.includes(existing.trim()) && trimmed.length > existing.trim().length,
-    );
-    if (existingIdx !== -1) {
-      deduplicated.splice(existingIdx, 1);
-    }
-
-    deduplicated.push(text);
-  }
-
-  if (deduplicated.length > 0) {
-    return { texts: deduplicated, sessionId, usage };
+  if (finalTexts.length > 0) {
+    return { texts: finalTexts, toolOutputs, assistantTexts, messageGroups, sessionId, usage };
   }
 
   return null;

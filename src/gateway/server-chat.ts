@@ -254,8 +254,11 @@ export function createAgentEventHandler({
     if (!shouldSuppressHeartbeatBroadcast(clientRunId)) {
       broadcast("chat", payload, { dropIfSlow: true });
     }
-    nodeSendToSession(sessionKey, "chat", payload);
+    // Only send to Web UI via broadcast; final message will send to channel (Feishu)
+    // nodeSendToSession(sessionKey, "chat", payload);
     chatRunState.deltaSentAt.set(clientRunId, now);
+    // Clear buffer after flushing
+    chatRunState.buffers.delete(clientRunId);
   };
 
   const emitChatDelta = (sessionKey: string, clientRunId: string, seq: number, text: string) => {

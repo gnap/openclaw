@@ -368,69 +368,108 @@ export async function runCliAgent(params: {
       }
     }
 
-    // Support both single text and multiple texts (for tool call outputs)
-    let payloads;
-    if (output.texts && output.texts.length > 0) {
-      // Deduplicate texts - first exact match, then subset match (keep longer version)
+    // DEBUG: Log tool outputs and assistant texts separately
+    if (output.toolOutputs && output.toolOutputs.length > 0) {
+      log.info(`[cli-streaming] toolOutputs: count=${output.toolOutputs.length}`);
+    }
+    if (output.assistantTexts && output.assistantTexts.length > 0) {
+      log.info(`[cli-streaming] assistantTexts: count=${output.assistantTexts.length}`);
+    }
+
+    // DEBUG: Log message groups
+    if (output.messageGroups && output.messageGroups.length > 0) {
+      log.info(`[cli-streaming] messageGroups: count=${output.messageGroups.length}`);
+      for (let i = 0; i < output.messageGroups.length; i++) {
+        const g = output.messageGroups[i];
+        const preview = g.texts.join(" | ").slice(0, 100).replace(/\n/g, "\\n");
+        log.info(
+          `[cli-streaming] group[${i}]: type=${g.type}, textsCount=${g.texts.length}, preview=${preview}...`,
+        );
+      }
+    }
+
+    // Build payloads from messageGroups: each group = 1 message
+    // - tool group: each text is a separate message
+    // - assistant group: texts within the group are joined together
+    let payloads: { text: string }[] = [];
+
+    if (output.messageGroups && output.messageGroups.length > 0) {
+      for (const group of output.messageGroups) {
+        if (group.type === "tool") {
+          // Tool: each text is a separate message
+          for (const text of group.texts) {
+            if (text.trim()) {
+              payloads.push({ text: text.trim() });
+            }
+          }
+        } else {
+          // Assistant: join texts within the group
+          const joined = group.texts.join("\n\n");
+          if (joined.trim()) {
+            payloads.push({ text: joined.trim() });
+          }
+        }
+      }
+    }
+
+    // Fallback: if no messageGroups but we have toolOutputs/assistantTexts (legacy format)
+    if (payloads.length === 0 && output.toolOutputs && output.assistantTexts) {
+      // Legacy handling - use toolOutputs and assistantTexts
+      // Add tool outputs as separate messages
+      for (const toolOutput of output.toolOutputs) {
+        if (toolOutput.trim()) {
+          payloads.push({ text: toolOutput });
+        }
+      }
+
+      // Add assistant texts as a combined message
+      const combinedAssistant = output.assistantTexts.join("\n\n");
+      if (combinedAssistant.trim()) {
+        payloads.push({ text: combinedAssistant });
+      }
+    }
+
+    // Fallback: if no messageGroups or toolOutputs/assistantTexts but we have texts (legacy format)
+    if (payloads.length === 0 && output.texts && output.texts.length > 0) {
+      // Legacy handling - deduplicate and combine
       const seen = new Set<string>();
       const uniqueTexts: string[] = [];
       for (const t of output.texts) {
         const trimmed = t.trim();
         if (!trimmed) {
-          log.info(`[cli-streaming] skipping empty text`);
           continue;
         }
         if (seen.has(trimmed)) {
-          // DEBUG: Log which text was deduplicated
-          log.info(`[cli-streaming] deduplicated exact match: length=${trimmed.length}`);
           continue;
         }
 
-        // Check if this text is a subset of any existing text (keep longer version)
+        // Check subset
         const isSubset = uniqueTexts.some((existing) => {
           const existingTrimmed = existing.trim();
           return existingTrimmed.includes(trimmed) && existingTrimmed.length > trimmed.length;
         });
         if (isSubset) {
-          log.info(
-            `[cli-streaming] deduplicated subset: ${trimmed.length} chars is contained in longer text`,
-          );
           continue;
         }
 
-        // Check if any existing text is a subset of this text (new text is longer, replace shorter)
+        // Check reverse subset
         const existingIsSubset = uniqueTexts.findIndex((existing) => {
           const existingTrimmed = existing.trim();
           return trimmed.includes(existingTrimmed) && trimmed.length > existingTrimmed.length;
         });
         if (existingIsSubset !== -1) {
-          const removed = uniqueTexts.splice(existingIsSubset, 1)[0];
-          log.info(
-            `[cli-streaming] deduplicated: replaced shorter text (${removed.trim().length} chars) with longer (${trimmed.length} chars)`,
-          );
+          uniqueTexts.splice(existingIsSubset, 1);
         }
 
         seen.add(trimmed);
         uniqueTexts.push(t);
       }
 
-      // DEBUG: Log unique texts
-      log.info(`[cli-streaming] unique texts after dedup: count=${uniqueTexts.length}`);
-
-      // Combine all unique texts into a single payload to avoid multiple messages
       const combinedText = uniqueTexts.join("\n\n");
-
-      // DEBUG: Log combined text length
-      log.info(
-        `[cli-streaming] combined text length: ${combinedText.length}, preview: ${combinedText.slice(0, 100)}`,
-      );
-
       if (combinedText) {
         payloads = [{ text: combinedText }];
-      } else {
-        payloads = [];
       }
-    } else if (text) {
+    } else if (payloads.length === 0 && text) {
       payloads = [{ text }];
     }
 
