@@ -384,7 +384,6 @@ export function parseCliJsonlLine(line: string, backend: CliBackendConfig): CliS
     // Try search files tool call
     const searchToolCall = isRecord(toolCall?.searchToolCall) ? toolCall.searchToolCall : null;
     if (searchToolCall) {
-      const args = isRecord(searchToolCall.args) ? searchToolCall.args : null;
       const result = isRecord(searchToolCall.result) ? searchToolCall.result : null;
 
       if (result && typeof result.results === "string") {
