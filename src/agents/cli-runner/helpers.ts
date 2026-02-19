@@ -1069,6 +1069,17 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
   // Finalize: flush remaining thinking (show timing instead of content)
   const finalTexts: string[] = [];
 
+  // Flush any remaining assistant content after the last tool call
+  // This handles the case where the final assistant message comes after the last tool
+  if (assistantContent.trim()) {
+    const assistantGroup = getOrCreateAssistantGroup();
+    assistantGroup.texts.push(assistantContent.trim());
+    assistantTexts.push(assistantContent.trim());
+    log.info(
+      `[parseCliJsonl] flushed remaining assistantContent in finalize, length=${assistantContent.length}`,
+    );
+  }
+
   // Show thinking duration instead of full content
   if (thinkingContent.trim() && thinkingStartTime !== null) {
     const thinkingDurationMs = Date.now() - thinkingStartTime;
