@@ -1032,7 +1032,9 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
         lastAssistantText &&
         (resultTrimmed === lastAssistantText.trim() ||
           (resultTrimmed.includes(lastAssistantText.trim()) &&
-            Math.abs(resultTrimmed.length - lastAssistantText.trim().length) < 100));
+            Math.abs(resultTrimmed.length - lastAssistantText.trim().length) < 100) ||
+          (lastAssistantText.trim().includes(resultTrimmed) &&
+            Math.abs(lastAssistantText.trim().length - resultTrimmed.length) < 100));
 
       // DEBUG: log duplicate check details
       log.info(
