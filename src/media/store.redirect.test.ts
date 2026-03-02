@@ -1,7 +1,7 @@
-import JSZip from "jszip";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { PassThrough } from "node:stream";
+import JSZip from "jszip";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const realOs = await vi.importActual<typeof import("node:os")>("node:os");
@@ -81,6 +81,9 @@ describe("media store redirects", () => {
     expect(saved.contentType).toBe("text/plain");
     expect(path.extname(saved.path)).toBe(".txt");
     expect(await fs.readFile(saved.path, "utf8")).toBe("redirected");
+    const stat = await fs.stat(saved.path);
+    const expectedMode = process.platform === "win32" ? 0o666 : 0o644;
+    expect(stat.mode & 0o777).toBe(expectedMode);
   });
 
   it("sniffs xlsx from zip content when headers and url extension are missing", async () => {

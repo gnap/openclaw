@@ -280,13 +280,7 @@ public actor GatewayNodeSession {
     private func resetConnectionState() {
         self.hasNotifiedConnected = false
         self.snapshotReceived = false
-        if !self.snapshotWaiters.isEmpty {
-            let waiters = self.snapshotWaiters
-            self.snapshotWaiters.removeAll()
-            for waiter in waiters {
-                waiter.resume(returning: false)
-            }
-        }
+        self.drainSnapshotWaiters(returning: false)
     }
 
     private func handleChannelDisconnected(_ reason: String) async {
@@ -298,13 +292,7 @@ public actor GatewayNodeSession {
 
     private func markSnapshotReceived() {
         self.snapshotReceived = true
-        if !self.snapshotWaiters.isEmpty {
-            let waiters = self.snapshotWaiters
-            self.snapshotWaiters.removeAll()
-            for waiter in waiters {
-                waiter.resume(returning: true)
-            }
-        }
+        self.drainSnapshotWaiters(returning: true)
     }
 
     private func waitForSnapshot(timeoutMs: Int) async -> Bool {
@@ -322,11 +310,15 @@ public actor GatewayNodeSession {
 
     private func timeoutSnapshotWaiters() {
         guard !self.snapshotReceived else { return }
+        self.drainSnapshotWaiters(returning: false)
+    }
+
+    private func drainSnapshotWaiters(returning value: Bool) {
         if !self.snapshotWaiters.isEmpty {
             let waiters = self.snapshotWaiters
             self.snapshotWaiters.removeAll()
             for waiter in waiters {
-                waiter.resume(returning: false)
+                waiter.resume(returning: value)
             }
         }
     }

@@ -423,6 +423,8 @@ Doctor can generate one for you: `openclaw doctor --generate-gateway-token`.
 Note: `gateway.remote.token` is **only** for remote CLI calls; it does not
 protect local WS access.
 Optional: pin remote TLS with `gateway.remote.tlsFingerprint` when using `wss://`.
+Plaintext `ws://` is loopback-only by default. For trusted private-network
+paths, set `OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1` on the client process as break-glass.
 
 Local device pairing:
 

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { MsgContext } from "../../auto-reply/templating.js";
 import { expectInboundContextContract } from "../../../test/helpers/inbound-contract.js";
+import type { MsgContext } from "../../auto-reply/templating.js";
 
 let capturedCtx: MsgContext | undefined;
 
@@ -75,5 +75,30 @@ describe("signal createSignalEventHandler inbound contract", () => {
     expect(String(capturedCtx?.Body ?? "")).toContain("Alice");
     expect(String(capturedCtx?.Body ?? "")).toMatch(/Alice.*:/);
     expect(String(capturedCtx?.Body ?? "")).not.toContain("[from:");
+  });
+
+  it("drops sync envelopes when syncMessage is present but null", async () => {
+    const handler = createSignalEventHandler(
+      createBaseSignalEventHandlerDeps({
+        cfg: {
+          messages: { inbound: { debounceMs: 0 } },
+          channels: { signal: { dmPolicy: "open", allowFrom: ["*"] } },
+        },
+        historyLimit: 0,
+      }),
+    );
+
+    await handler(
+      createSignalReceiveEvent({
+        syncMessage: null,
+        dataMessage: {
+          message: "replayed sentTranscript envelope",
+          attachments: [],
+        },
+      }),
+    );
+
+    expect(capture.ctx).toBeUndefined();
+    expect(dispatchInboundMessageMock).not.toHaveBeenCalled();
   });
 });

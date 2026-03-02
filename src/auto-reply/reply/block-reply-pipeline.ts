@@ -1,7 +1,7 @@
-import type { ReplyPayload } from "../types.js";
-import type { BlockStreamingCoalescing } from "./block-streaming.js";
 import { logVerbose } from "../../globals.js";
+import type { ReplyPayload } from "../types.js";
 import { createBlockReplyCoalescer } from "./block-reply-coalescer.js";
+import type { BlockStreamingCoalescing } from "./block-streaming.js";
 
 export type BlockReplyPipeline = {
   enqueue: (payload: ReplyPayload) => void;
@@ -114,10 +114,12 @@ export function createBlockReplyPipeline(params: {
           return false;
         }
         await withTimeout(
-          onBlockReply(payload, {
-            abortSignal: abortController.signal,
-            timeoutMs,
-          }) ?? Promise.resolve(),
+          Promise.resolve(
+            onBlockReply(payload, {
+              abortSignal: abortController.signal,
+              timeoutMs,
+            }),
+          ),
           timeoutMs,
           timeoutError,
         );

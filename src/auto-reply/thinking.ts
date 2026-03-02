@@ -1,4 +1,4 @@
-export type ThinkLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ThinkLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "adaptive";
 export type VerboseLevel = "off" | "on" | "full";
 export type NoticeLevel = "off" | "on" | "full";
 export type ElevatedLevel = "off" | "on" | "ask" | "full";
@@ -44,6 +44,9 @@ export function normalizeThinkLevel(raw?: string | null): ThinkLevel | undefined
   }
   const key = raw.trim().toLowerCase();
   const collapsed = key.replace(/[\s_-]+/g, "");
+  if (collapsed === "adaptive" || collapsed === "auto") {
+    return "adaptive";
+  }
   if (collapsed === "xhigh" || collapsed === "extrahigh") {
     return "xhigh";
   }
@@ -90,6 +93,7 @@ export function listThinkingLevels(provider?: string | null, model?: string | nu
   if (supportsXHighThinking(provider, model)) {
     levels.push("xhigh");
   }
+  levels.push("adaptive");
   return levels;
 }
 

@@ -30,6 +30,7 @@ protocol LocationServicing: Sendable {
         timeoutMs: Int?) async throws -> CLLocation
 }
 
+@MainActor
 protocol DeviceStatusServicing: Sendable {
     func status() async throws -> OpenClawDeviceStatusPayload
     func info() -> OpenClawDeviceInfoPayload
