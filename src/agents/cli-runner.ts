@@ -1,8 +1,7 @@
 import type { ImageContent } from "@mariozechner/pi-ai";
+import { resolveHeartbeatPrompt } from "../auto-reply/heartbeat.js";
 import type { ThinkLevel } from "../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../config/config.js";
-import type { EmbeddedPiRunResult } from "./pi-embedded-runner.js";
-import { resolveHeartbeatPrompt } from "../auto-reply/heartbeat.js";
 import { shouldLogVerbose } from "../globals.js";
 import { isTruthyEnvValue } from "../infra/env.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
@@ -14,13 +13,12 @@ import {
   appendImagePathsToPrompt,
   buildCliArgs,
   buildSystemPrompt,
-  cleanupResumeProcesses,
-  cleanupSuspendedCliProcesses,
   enqueueCliRun,
   normalizeCliModel,
   parseCliJson,
   parseCliJsonl,
   parseCliJsonlLine,
+  resolveCliNoOutputTimeoutMs,
   resolvePromptInput,
   resolveSessionIdToSend,
   resolveSystemPromptUsage,
@@ -29,6 +27,7 @@ import {
 import { resolveOpenClawDocsPath } from "./docs-path.js";
 import { FailoverError, resolveFailoverStatus } from "./failover-error.js";
 import { classifyFailoverReason, isFailoverErrorMessage } from "./pi-embedded-helpers.js";
+import type { EmbeddedPiRunResult } from "./pi-embedded-runner.js";
 import { redactRunIdentifier, resolveRunWorkspaceDir } from "./workspace-run.js";
 
 const log = createSubsystemLogger("agent/claude-cli");
@@ -111,6 +110,7 @@ export async function runCliAgent(params: {
   const { defaultAgentId, sessionAgentId } = resolveSessionAgentIds({
     sessionKey: params.sessionKey,
     config: params.config,
+    agentId: params.agentId,
   });
   const heartbeatPrompt =
     sessionAgentId === defaultAgentId
@@ -242,12 +242,6 @@ export async function runCliAgent(params: {
         return next;
       })();
 
-      // Cleanup suspended processes that have accumulated (regardless of sessionId)
-      await cleanupSuspendedCliProcesses(backend);
-      if (useResume && cliSessionIdToSend) {
-        await cleanupResumeProcesses(backend, cliSessionIdToSend);
-      }
-
       // Set up streaming callbacks if provided
       const streamCallbacks = params.streamCallbacks;
       const onLineCallback = streamCallbacks
@@ -256,9 +250,11 @@ export async function runCliAgent(params: {
             if (!event || !("text" in event)) {
               return;
             }
-            log.info(
-              `[cli-streaming] event type: ${event.type}, text: ${event.text?.substring(0, 80)}...`,
-            );
+            if (shouldLogVerbose()) {
+              log.debug(
+                `[cli-streaming] event type: ${event.type}, text: ${event.text?.substring(0, 80)}...`,
+              );
+            }
             switch (event.type) {
               case "thinking":
                 streamCallbacks.onReasoning?.(event.text);
@@ -274,12 +270,18 @@ export async function runCliAgent(params: {
           }
         : undefined;
 
+      const noOutputTimeoutMs = resolveCliNoOutputTimeoutMs({
+        backend,
+        timeoutMs: params.timeoutMs,
+        useResume,
+      });
       const result = await runCommandWithTimeout([backend.command, ...args], {
         timeoutMs: params.timeoutMs,
         cwd: workspaceDir,
         env,
         input: stdinPayload,
         onLine: onLineCallback,
+        noOutputTimeoutMs,
       });
 
       const stdout = result.stdout.trim();
@@ -473,14 +475,13 @@ export async function runCliAgent(params: {
       payloads = [{ text }];
     }
 
-    const returnedSessionId = output.sessionId ?? sessionIdSent ?? params.sessionId;
-
     return {
       payloads,
       meta: {
         durationMs: Date.now() - started,
         agentMeta: {
-          sessionId: returnedSessionId ?? "",
+          sessionId:
+            output.sessionId ?? sessionIdSent ?? params.cliSessionId ?? params.sessionId ?? "",
           provider: params.provider,
           model: modelId,
           usage: output.usage,
@@ -492,6 +493,22 @@ export async function runCliAgent(params: {
     };
   } catch (err) {
     if (err instanceof FailoverError) {
+      // Check if this is a session expired error and we have a session to clear
+      if (err.reason === "session_expired" && params.cliSessionId && params.sessionKey) {
+        log.warn(
+          `CLI session expired, clearing session ID and retrying: provider=${params.provider} session=${redactRunIdentifier(params.cliSessionId)}`,
+        );
+
+        // Clear the expired session ID from the session entry
+        // This requires access to the session store, which we don't have here
+        // We'll need to modify the caller to handle this case
+
+        // Retry without the session ID to create a new session
+        return runCliAgent({
+          ...params,
+          cliSessionId: undefined,
+        });
+      }
       throw err;
     }
     const message = err instanceof Error ? err.message : String(err);

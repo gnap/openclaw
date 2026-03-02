@@ -1,165 +1,38 @@
-import type { AgentTool } from "@mariozechner/pi-agent-core";
-import type { ImageContent } from "@mariozechner/pi-ai";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { ImageContent } from "@mariozechner/pi-ai";
 import type { ThinkLevel } from "../../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { CliBackendConfig } from "../../config/types.js";
-import type { EmbeddedContextFile } from "../pi-embedded-helpers.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
-import { runExec } from "../../process/exec.js";
 import { buildTtsSystemPromptHint } from "../../tts/tts.js";
-import { escapeRegExp, isRecord } from "../../utils.js";
+import { isRecord } from "../../utils.js";
+import { buildModelAliasLines } from "../model-alias-lines.js";
 import { resolveDefaultModelForAgent } from "../model-selection.js";
+import { resolveOwnerDisplaySetting } from "../owner-display.js";
+import type { EmbeddedContextFile } from "../pi-embedded-helpers.js";
 import { detectRuntimeShell } from "../shell-utils.js";
 import { buildSystemPromptParams } from "../system-prompt-params.js";
 import { buildAgentSystemPrompt } from "../system-prompt.js";
+export { buildCliSupervisorScopeKey, resolveCliNoOutputTimeoutMs } from "./reliability.js";
 
 const log = createSubsystemLogger("agent/cli-runner/helpers");
 
 const CLI_RUN_QUEUE = new Map<string, Promise<unknown>>();
-
-export async function cleanupResumeProcesses(
-  backend: CliBackendConfig,
-  sessionId: string,
-): Promise<void> {
-  if (process.platform === "win32") {
-    return;
-  }
-  const resumeArgs = backend.resumeArgs ?? [];
-  if (resumeArgs.length === 0) {
-    return;
-  }
-  if (!resumeArgs.some((arg) => arg.includes("{sessionId}"))) {
-    return;
-  }
-  const commandToken = path.basename(backend.command ?? "").trim();
-  if (!commandToken) {
-    return;
-  }
-
-  const resumeTokens = resumeArgs.map((arg) => arg.replaceAll("{sessionId}", sessionId));
-  const pattern = [commandToken, ...resumeTokens]
-    .filter(Boolean)
-    .map((token) => escapeRegExp(token))
-    .join(".*");
-  if (!pattern) {
-    return;
-  }
-
-  try {
-    await runExec("pkill", ["-f", pattern]);
-  } catch {
-    // ignore missing pkill or no matches
-  }
-}
-
-function buildSessionMatchers(backend: CliBackendConfig): RegExp[] {
-  const commandToken = path.basename(backend.command ?? "").trim();
-  if (!commandToken) {
-    return [];
-  }
-  const matchers: RegExp[] = [];
-  const sessionArg = backend.sessionArg?.trim();
-  const sessionArgs = backend.sessionArgs ?? [];
-  const resumeArgs = backend.resumeArgs ?? [];
-
-  const addMatcher = (args: string[]) => {
-    if (args.length === 0) {
-      return;
-    }
-    const tokens = [commandToken, ...args];
-    const pattern = tokens
-      .map((token, index) => {
-        const tokenPattern = tokenToRegex(token);
-        return index === 0 ? `(?:^|\\s)${tokenPattern}` : `\\s+${tokenPattern}`;
-      })
-      .join("");
-    matchers.push(new RegExp(pattern));
-  };
-
-  if (sessionArgs.some((arg) => arg.includes("{sessionId}"))) {
-    addMatcher(sessionArgs);
-  } else if (sessionArg) {
-    addMatcher([sessionArg, "{sessionId}"]);
-  }
-
-  if (resumeArgs.some((arg) => arg.includes("{sessionId}"))) {
-    addMatcher(resumeArgs);
-  }
-
-  return matchers;
-}
-
-function tokenToRegex(token: string): string {
-  if (!token.includes("{sessionId}")) {
-    return escapeRegExp(token);
-  }
-  const parts = token.split("{sessionId}").map((part) => escapeRegExp(part));
-  return parts.join("\\S+");
-}
-
-/**
- * Cleanup suspended OpenClaw CLI processes that have accumulated.
- * Only cleans up if there are more than the threshold (default: 10).
- */
-export async function cleanupSuspendedCliProcesses(
-  backend: CliBackendConfig,
-  threshold = 10,
-): Promise<void> {
-  if (process.platform === "win32") {
-    return;
-  }
-  const matchers = buildSessionMatchers(backend);
-  if (matchers.length === 0) {
-    return;
-  }
-
-  try {
-    const { stdout } = await runExec("ps", ["-ax", "-o", "pid=,stat=,command="]);
-    const suspended: number[] = [];
-    for (const line of stdout.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        continue;
-      }
-      const match = /^(\d+)\s+(\S+)\s+(.*)$/.exec(trimmed);
-      if (!match) {
-        continue;
-      }
-      const pid = Number(match[1]);
-      const stat = match[2] ?? "";
-      const command = match[3] ?? "";
-      if (!Number.isFinite(pid)) {
-        continue;
-      }
-      if (!stat.includes("T")) {
-        continue;
-      }
-      if (!matchers.some((matcher) => matcher.test(command))) {
-        continue;
-      }
-      suspended.push(pid);
-    }
-
-    if (suspended.length > threshold) {
-      // Verified locally: stopped (T) processes ignore SIGTERM, so use SIGKILL.
-      await runExec("kill", ["-9", ...suspended.map((pid) => String(pid))]);
-    }
-  } catch {
-    // ignore errors - best effort cleanup
-  }
-}
 export function enqueueCliRun<T>(key: string, task: () => Promise<T>): Promise<T> {
   const prior = CLI_RUN_QUEUE.get(key) ?? Promise.resolve();
   const chained = prior.catch(() => undefined).then(task);
-  const tracked = chained.finally(() => {
-    if (CLI_RUN_QUEUE.get(key) === tracked) {
-      CLI_RUN_QUEUE.delete(key);
-    }
-  });
+  // Keep queue continuity even when a run rejects, without emitting unhandled rejections.
+  const tracked = chained
+    .catch(() => undefined)
+    .finally(() => {
+      if (CLI_RUN_QUEUE.get(key) === tracked) {
+        CLI_RUN_QUEUE.delete(key);
+      }
+    });
   CLI_RUN_QUEUE.set(key, tracked);
   return chained;
 }
@@ -416,25 +289,6 @@ export function parseCliJsonlLine(line: string, backend: CliBackendConfig): CliS
   return null;
 }
 
-function buildModelAliasLines(cfg?: OpenClawConfig) {
-  const models = cfg?.agents?.defaults?.models ?? {};
-  const entries: Array<{ alias: string; model: string }> = [];
-  for (const [keyRaw, entryRaw] of Object.entries(models)) {
-    const model = String(keyRaw ?? "").trim();
-    if (!model) {
-      continue;
-    }
-    const alias = String((entryRaw as { alias?: string } | undefined)?.alias ?? "").trim();
-    if (!alias) {
-      continue;
-    }
-    entries.push({ alias, model });
-  }
-  return entries
-    .toSorted((a, b) => a.alias.localeCompare(b.alias))
-    .map((entry) => `- ${entry.alias}: ${entry.model}`);
-}
-
 export function buildSystemPrompt(params: {
   workspaceDir: string;
   config?: OpenClawConfig;
@@ -469,14 +323,18 @@ export function buildSystemPrompt(params: {
     },
   });
   const ttsHint = params.config ? buildTtsSystemPromptHint(params.config) : undefined;
+  const ownerDisplay = resolveOwnerDisplaySetting(params.config);
   return buildAgentSystemPrompt({
     workspaceDir: params.workspaceDir,
     defaultThinkLevel: params.defaultThinkLevel,
     extraSystemPrompt: params.extraSystemPrompt,
     ownerNumbers: params.ownerNumbers,
+    ownerDisplay: ownerDisplay.ownerDisplay,
+    ownerDisplaySecret: ownerDisplay.ownerDisplaySecret,
     reasoningTagHint: false,
     heartbeatPrompt: params.heartbeatPrompt,
     docsPath: params.docsPath,
+    acpEnabled: params.config?.acp?.enabled !== false,
     runtimeInfo,
     toolNames: params.tools.map((tool) => tool.name),
     modelAliasLines: buildModelAliasLines(params.config),
@@ -848,8 +706,8 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
         } else if (typeof successVal === "object" && successVal !== null) {
           // Handle object format: { path, linesAdded, linesRemoved, diffString, ... }
           const editResult = successVal as Record<string, unknown>;
-          if (editResult.path) {
-            output += `# ${editResult.path}\n`;
+          if (editResult.path !== undefined && editResult.path !== null) {
+            output += `# ${typeof editResult.path === "string" ? editResult.path : JSON.stringify(editResult.path)}\n`;
           }
           if (
             typeof editResult.linesAdded === "number" &&
@@ -863,8 +721,8 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
             output += JSON.stringify(editResult, null, 2);
           }
         } else if (successVal !== undefined) {
-          // Handle other truthy values
-          output += String(successVal);
+          // Handle other truthy values (avoid Object.toString for objects)
+          output += typeof successVal === "string" ? successVal : JSON.stringify(successVal);
         } else {
           // DEBUG: log unknown result format
           log.info(
@@ -911,7 +769,6 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
     const msgType = typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
     const toolSubtype = typeof parsed.subtype === "string" ? parsed.subtype.toLowerCase() : "";
 
-    // DEBUG: Log all tool_call events with their subtypes
     if (msgType === "tool_call") {
       log.info(
         `[parseCliJsonl] tool_call event: subtype=${toolSubtype}, hasToolCall=${!!parsed.tool_call}`,
@@ -1036,7 +893,6 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
           (lastAssistantText.trim().includes(resultTrimmed) &&
             Math.abs(lastAssistantText.trim().length - resultTrimmed.length) < 100));
 
-      // DEBUG: log duplicate check details
       log.info(
         `[parseCliJsonl] result duplicate check: lastAssistantText_len=${lastAssistantText.length}, result_len=${resultTrimmed.length}, isDuplicate=${isDuplicate}, toolOutputs_len=${toolOutputs.length}`,
       );
@@ -1050,6 +906,8 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
           `[parseCliJsonl] result added to assistant group, group_id=${messageGroups.length - 1}`,
         );
       } else {
+        // Mark as consumed so finalize does not flush assistantContent again (already flushed above)
+        lastResultText = resultTrimmed;
         log.info(`[parseCliJsonl] skipping duplicate result text`);
       }
 
@@ -1067,7 +925,7 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
   // BUT only if we haven't already added the result (to avoid duplicates)
   const hasResultText = lastResultText
     ? messageGroups.some(
-        (g) => g.type === "assistant" && g.texts.some((t) => t.includes(lastResultText!)),
+        (g) => g.type === "assistant" && g.texts.some((t) => t.includes(lastResultText)),
       )
     : false;
   if (assistantContent.trim() && !hasResultText) {
@@ -1102,7 +960,6 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
     }
   }
 
-  // Debug log message groups
   log.info(`[parseCliJsonl] final messageGroups: count=${messageGroups.length}`);
   for (let i = 0; i < messageGroups.length; i++) {
     const g = messageGroups[i];
