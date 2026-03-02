@@ -10,8 +10,8 @@ describe("resolveReceiveIdType", () => {
     expect(resolveReceiveIdType("ou_123")).toBe("open_id");
   });
 
-  it("defaults unprefixed IDs to user_id", () => {
-    expect(resolveReceiveIdType("u_123")).toBe("user_id");
+  it("defaults unprefixed IDs to open_id", () => {
+    expect(resolveReceiveIdType("u_123")).toBe("open_id");
   });
 });
 

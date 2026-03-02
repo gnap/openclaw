@@ -186,7 +186,9 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       responsePrefixContextProvider: prefixContext.responsePrefixContextProvider,
       humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, agentId),
       onReplyStart: () => {
-        if (streamingEnabled && renderMode === "card") {
+        // Start streaming card early when streaming enabled so CLI/agent onPartialReply
+        // can update the card incrementally (card or auto; for auto we may use card later).
+        if (streamingEnabled && (renderMode === "card" || renderMode === "auto")) {
           startStreaming();
         }
         void typingCallbacks.onReplyStart?.();
