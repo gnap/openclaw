@@ -223,11 +223,51 @@ export async function runAgentTurnWithFallback(params: {
                   ownerNumbers: params.followupRun.run.ownerNumbers,
                   cliSessionId,
                   images: params.opts?.images,
+                  // Pass streaming callbacks for real-time output to Web UI
+                  // NOTE: streaming goes to chat-delta (Web UI), NOT to Feishu
+                  // Final delivery still goes to Feishu via reply pipeline
+                  // So we always return 0 to NOT skip final delivery
+                  streamCallbacks: (() => {
+                    return {
+                      // Always return 0 - streaming goes to Web UI, final goes to Feishu
+                      flushAndGetSentCount: () => {
+                        return 0;
+                      },
+                      onReasoning: (text) => {
+                        logVerbose(`[streaming] emitting reasoning: ${text?.substring(0, 30)}...`);
+                        emitAgentEvent({
+                          runId,
+                          stream: "reasoning",
+                          data: { text },
+                        });
+                      },
+                      onAssistant: (text) => {
+                        logVerbose(`[streaming] emitting assistant: ${text?.substring(0, 30)}...`);
+                        emitAgentEvent({
+                          runId,
+                          stream: "assistant",
+                          data: { text },
+                        });
+                        // Forward CLI stream to channel (e.g. Feishu card) when backend outputs jsonl
+                        if (text && params.opts?.onPartialReply) {
+                          void params.opts.onPartialReply({ text });
+                        }
+                      },
+                      onToolResult: (text) => {
+                        logVerbose(
+                          `[streaming] emitting tool_result: ${text?.substring(0, 30)}...`,
+                        );
+                        emitAgentEvent({
+                          runId,
+                          stream: "tool_result",
+                          data: { text },
+                        });
+                      },
+                    };
+                  })(),
                 });
 
-                // CLI backends don't emit streaming assistant events, so we need to
-                // emit one with the final text so server-chat can populate its buffer
-                // and send the response to TUI/WebSocket clients.
+                // Emit final assistant message (for Web UI)
                 const cliText = result.payloads?.[0]?.text?.trim();
                 if (cliText) {
                   emitAgentEvent({
@@ -394,37 +434,35 @@ export async function runAgentTurnWithFallback(params: {
                 : undefined,
             shouldEmitToolResult: params.shouldEmitToolResult,
             shouldEmitToolOutput: params.shouldEmitToolOutput,
-            onToolResult: onToolResult
-              ? (() => {
-                  // Serialize tool result delivery to preserve message ordering.
-                  // Without this, concurrent tool callbacks race through typing signals
-                  // and message sends, causing out-of-order delivery to the user.
-                  // See: https://github.com/openclaw/openclaw/issues/11044
-                  let toolResultChain: Promise<void> = Promise.resolve();
-                  return (payload: ReplyPayload) => {
-                    toolResultChain = toolResultChain
-                      .then(async () => {
-                        const { text, skip } = normalizeStreamingText(payload);
-                        if (skip) {
-                          return;
-                        }
-                        await params.typingSignals.signalTextDelta(text);
-                        await onToolResult({
-                          text,
-                          mediaUrls: payload.mediaUrls,
+            onToolResult:
+              isCliProvider(provider, params.followupRun.run.config) && params.opts
+                ? undefined
+                : onToolResult
+                  ? (() => {
+                      let toolResultChain: Promise<void> = Promise.resolve();
+                      return (payload: ReplyPayload) => {
+                        toolResultChain = toolResultChain
+                          .then(async () => {
+                            const { text, skip } = normalizeStreamingText(payload);
+                            if (skip) {
+                              return;
+                            }
+                            await params.typingSignals.signalTextDelta(text);
+                            await onToolResult({
+                              text,
+                              mediaUrls: payload.mediaUrls,
+                            });
+                          })
+                          .catch((err) => {
+                            logVerbose(`tool result delivery failed: ${String(err)}`);
+                          });
+                        const task = toolResultChain.finally(() => {
+                          params.pendingToolTasks.delete(task);
                         });
-                      })
-                      .catch((err) => {
-                        // Keep chain healthy after an error so later tool results still deliver.
-                        logVerbose(`tool result delivery failed: ${String(err)}`);
-                      });
-                    const task = toolResultChain.finally(() => {
-                      params.pendingToolTasks.delete(task);
-                    });
-                    params.pendingToolTasks.add(task);
-                  };
-                })()
-              : undefined,
+                        params.pendingToolTasks.add(task);
+                      };
+                    })()
+                  : undefined,
           });
         },
       });

@@ -74,6 +74,10 @@ export type EmbeddedPiRunResult = {
   messagingToolSentTargets?: MessagingToolSend[];
   // Count of successful cron.add tool calls in this run.
   successfulCronAdds?: number;
+  // True when CLI streaming already sent content to channel (e.g. Feishu card).
+  streamingSentToChannel?: boolean;
+  // Characters sent via CLI streaming to channel.
+  streamingCharsSent?: number;
 };
 
 export type EmbeddedPiCompactResult = {

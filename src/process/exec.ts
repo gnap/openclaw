@@ -136,6 +136,8 @@ export type CommandOptions = {
   env?: NodeJS.ProcessEnv;
   windowsVerbatimArguments?: boolean;
   noOutputTimeoutMs?: number;
+  /** Called for each line of stdout (e.g. for JSONL streaming). */
+  onLine?: (line: string) => void;
 };
 
 export async function runCommandWithTimeout(
@@ -144,7 +146,7 @@ export async function runCommandWithTimeout(
 ): Promise<SpawnResult> {
   const options: CommandOptions =
     typeof optionsOrTimeout === "number" ? { timeoutMs: optionsOrTimeout } : optionsOrTimeout;
-  const { timeoutMs, cwd, input, env, noOutputTimeoutMs } = options;
+  const { timeoutMs, cwd, input, env, noOutputTimeoutMs, onLine } = options;
   const { windowsVerbatimArguments } = options;
   const hasInput = input !== undefined;
 
@@ -237,8 +239,18 @@ export async function runCommandWithTimeout(
       child.stdin.end();
     }
 
+    let stdoutLineBuffer = "";
     child.stdout?.on("data", (d) => {
-      stdout += d.toString();
+      const chunk = d.toString();
+      stdout += chunk;
+      if (onLine) {
+        stdoutLineBuffer += chunk;
+        const lines = stdoutLineBuffer.split(/\r?\n/g);
+        stdoutLineBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          onLine(line);
+        }
+      }
       armNoOutputTimer();
     });
     child.stderr?.on("data", (d) => {
