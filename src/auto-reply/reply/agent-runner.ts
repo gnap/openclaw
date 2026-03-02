@@ -184,21 +184,6 @@ export async function runReplyAgent(params: {
   );
   const applyReplyToMode = createReplyToModeFilterForChannel(replyToMode, replyToChannel);
   const cfg = followupRun.run.config;
-  // Check if CLI provider - CLI has its own streaming via cursor-agent, don't use blockReplyPipeline
-  // Note: This checks the initial provider. The actual provider might change during fallback,
-  // but we err on the side of not creating blockReplyPipeline when streaming is enabled
-  // to avoid duplicate messages from both streaming paths.
-  const isCli = isCliProvider(followupRun.run.provider, cfg);
-  // Don't create blockReplyPipeline if:
-  // 1. Provider is CLI (has its own streaming), OR
-  // 2. Block streaming is enabled (streaming will be handled by another path)
-  const skipBlockPipeline = isCli || blockStreamingEnabled;
-
-  // DEBUG: Log decision
-  defaultRuntime.error(
-    `[DEBUG] blockPipeline: isCli=${isCli}, blockStreamingEnabled=${blockStreamingEnabled}, skipBlockPipeline=${skipBlockPipeline}, provider=${followupRun.run.provider}`,
-  );
-
   const blockReplyCoalescing =
     blockStreamingEnabled && opts?.onBlockReply
       ? resolveEffectiveBlockStreamingConfig({
@@ -209,7 +194,7 @@ export async function runReplyAgent(params: {
         }).coalescing
       : undefined;
   const blockReplyPipeline =
-    !skipBlockPipeline && opts?.onBlockReply
+    blockStreamingEnabled && opts?.onBlockReply
       ? createBlockReplyPipeline({
           onBlockReply: opts.onBlockReply,
           timeoutMs: blockReplyTimeoutMs,
@@ -441,11 +426,6 @@ export async function runReplyAgent(params: {
     }
 
     const payloadArray = runResult.payloads ?? [];
-
-    // If streaming already sent to channel, skip sending final to avoid duplicates
-    if (runResult.streamingSentToChannel) {
-      return finalizeWithFollowup(undefined, queueKey, runFollowupTurn);
-    }
 
     if (blockReplyPipeline) {
       await blockReplyPipeline.flush({ force: true });

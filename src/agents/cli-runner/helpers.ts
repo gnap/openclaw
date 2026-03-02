@@ -460,10 +460,10 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
     return null;
   }
 
-  // Detect if this is cursor-agent based on CLI command path
+  // Detect if this is cursor-agent based on CLI command path.
+  // Non-cursor path below matches upstream parseCliJsonl (item.text collection only).
   const isCursorAgent = backend.command.toLowerCase().includes("cursor");
 
-  // If not cursor-agent, use the main branch logic (extract from parsed.item.text)
   if (!isCursorAgent) {
     let sessionId: string | undefined;
     let usage: CliUsage | undefined;
@@ -502,7 +502,9 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
     return { text, sessionId, usage };
   }
 
-  // === Cursor-agent specific parsing ===
+  // Cursor-agent: extended parsing (messageGroups, tool/assistant sequence, duplicate
+  // result handling) for compatibility with Cursor CLI jsonl output; keeps upstream
+  // CliOutput shape via optional text/texts/toolOutputs/assistantTexts/messageGroups.
   let sessionId: string | undefined;
   let usage: CliUsage | undefined;
 
@@ -970,7 +972,16 @@ export function parseCliJsonl(raw: string, backend: CliBackendConfig): CliOutput
   }
 
   if (finalTexts.length > 0) {
-    return { texts: finalTexts, toolOutputs, assistantTexts, messageGroups, sessionId, usage };
+    const text = finalTexts.join("\n\n");
+    return {
+      text,
+      texts: finalTexts,
+      toolOutputs,
+      assistantTexts,
+      messageGroups,
+      sessionId,
+      usage,
+    };
   }
 
   return null;

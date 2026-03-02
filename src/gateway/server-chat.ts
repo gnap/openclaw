@@ -1,16 +1,44 @@
+import { DEFAULT_HEARTBEAT_ACK_MAX_CHARS, stripHeartbeatToken } from "../auto-reply/heartbeat.js";
 import { normalizeVerboseLevel } from "../auto-reply/thinking.js";
+import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import { loadConfig } from "../config/config.js";
 import { type AgentEventPayload, getAgentRunContext } from "../infra/agent-events.js";
 import { resolveHeartbeatVisibility } from "../infra/heartbeat-visibility.js";
+import { stripInlineDirectiveTagsForDisplay } from "../utils/directive-tags.js";
 import { loadSessionEntry } from "./session-utils.js";
 import { formatForLog } from "./ws-log.js";
 
+function resolveHeartbeatAckMaxChars(): number {
+  try {
+    const cfg = loadConfig();
+    return Math.max(
+      0,
+      cfg.agents?.defaults?.heartbeat?.ackMaxChars ?? DEFAULT_HEARTBEAT_ACK_MAX_CHARS,
+    );
+  } catch {
+    return DEFAULT_HEARTBEAT_ACK_MAX_CHARS;
+  }
+}
+
+function resolveHeartbeatContext(runId: string, sourceRunId?: string) {
+  const primary = getAgentRunContext(runId);
+  if (primary?.isHeartbeat) {
+    return primary;
+  }
+  if (sourceRunId && sourceRunId !== runId) {
+    const source = getAgentRunContext(sourceRunId);
+    if (source?.isHeartbeat) {
+      return source;
+    }
+  }
+  return primary;
+}
+
 /**
- * Check if webchat broadcasts should be suppressed for heartbeat runs.
- * Returns true if the run is a heartbeat and showOk is false.
+ * Check if heartbeat ACK/noise should be hidden from interactive chat surfaces.
  */
-function shouldSuppressHeartbeatBroadcast(runId: string): boolean {
-  const runContext = getAgentRunContext(runId);
+function shouldHideHeartbeatChatOutput(runId: string, sourceRunId?: string): boolean {
+  const runContext = resolveHeartbeatContext(runId, sourceRunId);
   if (!runContext?.isHeartbeat) {
     return false;
   }
@@ -23,6 +51,28 @@ function shouldSuppressHeartbeatBroadcast(runId: string): boolean {
     // Default to suppressing if we can't load config
     return true;
   }
+}
+
+function normalizeHeartbeatChatFinalText(params: {
+  runId: string;
+  sourceRunId?: string;
+  text: string;
+}): { suppress: boolean; text: string } {
+  if (!shouldHideHeartbeatChatOutput(params.runId, params.sourceRunId)) {
+    return { suppress: false, text: params.text };
+  }
+
+  const stripped = stripHeartbeatToken(params.text, {
+    mode: "heartbeat",
+    maxAckChars: resolveHeartbeatAckMaxChars(),
+  });
+  if (!stripped.didStrip) {
+    return { suppress: false, text: params.text };
+  }
+  if (stripped.shouldSkip) {
+    return { suppress: true, text: "" };
+  }
+  return { suppress: false, text: stripped.text };
 }
 
 export type ChatRunEntry = {
@@ -227,18 +277,30 @@ export function createAgentEventHandler({
   clearAgentRunContext,
   toolEventRecipients,
 }: AgentEventHandlerOptions) {
-  // Track pending flush deadlines per client run
-  const pendingFlushDeadlines = new Map<string, NodeJS.Timeout>();
-
-  const flushChatDelta = (sessionKey: string, clientRunId: string, seq: number) => {
-    const text = chatRunState.buffers.get(clientRunId);
-    if (!text) {
+  const emitChatDelta = (
+    sessionKey: string,
+    clientRunId: string,
+    sourceRunId: string,
+    seq: number,
+    text: string,
+  ) => {
+    const cleaned = stripInlineDirectiveTagsForDisplay(text).text;
+    if (!cleaned) {
+      return;
+    }
+    if (isSilentReplyText(cleaned, SILENT_REPLY_TOKEN)) {
+      return;
+    }
+    chatRunState.buffers.set(clientRunId, cleaned);
+    if (shouldHideHeartbeatChatOutput(clientRunId, sourceRunId)) {
       return;
     }
     const now = Date.now();
-    console.log(
-      `[chat-delta] FLUSHING: runId=${clientRunId}, seq=${seq}, textLen=${text.length}, text=${text.substring(0, 50)}...`,
-    );
+    const last = chatRunState.deltaSentAt.get(clientRunId) ?? 0;
+    if (now - last < 150) {
+      return;
+    }
+    chatRunState.deltaSentAt.set(clientRunId, now);
     const payload = {
       runId: clientRunId,
       sessionKey,
@@ -246,75 +308,33 @@ export function createAgentEventHandler({
       state: "delta" as const,
       message: {
         role: "assistant",
-        content: [{ type: "text", text }],
+        content: [{ type: "text", text: cleaned }],
         timestamp: now,
       },
     };
-    // Suppress webchat broadcast for heartbeat runs when showOk is false
-    if (!shouldSuppressHeartbeatBroadcast(clientRunId)) {
-      broadcast("chat", payload, { dropIfSlow: true });
-    }
-    // Only send to Web UI via broadcast; final message will send to channel (Feishu)
-    // nodeSendToSession(sessionKey, "chat", payload);
-    chatRunState.deltaSentAt.set(clientRunId, now);
-    // Clear buffer after flushing
-    chatRunState.buffers.delete(clientRunId);
-  };
-
-  const emitChatDelta = (sessionKey: string, clientRunId: string, seq: number, text: string) => {
-    const now = Date.now();
-    const last = chatRunState.deltaSentAt.get(clientRunId) ?? 0;
-    const timeSinceLastSend = now - last;
-
-    console.log(
-      `[chat-delta] received: runId=${clientRunId}, seq=${seq}, timeSinceLast=${timeSinceLastSend}, textLen=${text.length}, text=${text.substring(0, 30)}...`,
-    );
-
-    // Update buffer with new text
-    const existingText = chatRunState.buffers.get(clientRunId) ?? "";
-    chatRunState.buffers.set(clientRunId, existingText + text);
-
-    // If it's been too long since last send (deadline exceeded), flush immediately
-    if (timeSinceLastSend > 300) {
-      flushChatDelta(sessionKey, clientRunId, seq);
-      // Clear any pending deadline
-      const existingTimer = pendingFlushDeadlines.get(clientRunId);
-      if (existingTimer) {
-        clearTimeout(existingTimer);
-        pendingFlushDeadlines.delete(clientRunId);
-      }
-      return;
-    }
-
-    // Schedule a flush at deadline (300ms from last send)
-    const existingTimer = pendingFlushDeadlines.get(clientRunId);
-    if (!existingTimer) {
-      const remainingTime = 300 - timeSinceLastSend;
-      const timer = setTimeout(() => {
-        pendingFlushDeadlines.delete(clientRunId);
-        // Check deadline again when timer fires - flush if deadline exceeded
-        const flushNow = Date.now();
-        const lastSent = chatRunState.deltaSentAt.get(clientRunId) ?? 0;
-        const timeSinceLast = flushNow - lastSent;
-        console.log(
-          `[chat-delta] timer fired: runId=${clientRunId}, timeSinceLast=${timeSinceLast}`,
-        );
-        if (timeSinceLast > 300) {
-          flushChatDelta(sessionKey, clientRunId, seq);
-        }
-      }, remainingTime);
-      pendingFlushDeadlines.set(clientRunId, timer);
-    }
+    broadcast("chat", payload, { dropIfSlow: true });
+    nodeSendToSession(sessionKey, "chat", payload);
   };
 
   const emitChatFinal = (
     sessionKey: string,
     clientRunId: string,
+    sourceRunId: string,
     seq: number,
     jobState: "done" | "error",
     error?: unknown,
   ) => {
-    const text = chatRunState.buffers.get(clientRunId)?.trim() ?? "";
+    const bufferedText = stripInlineDirectiveTagsForDisplay(
+      chatRunState.buffers.get(clientRunId) ?? "",
+    ).text.trim();
+    const normalizedHeartbeatText = normalizeHeartbeatChatFinalText({
+      runId: clientRunId,
+      sourceRunId,
+      text: bufferedText,
+    });
+    const text = normalizedHeartbeatText.text.trim();
+    const shouldSuppressSilent =
+      normalizedHeartbeatText.suppress || isSilentReplyText(text, SILENT_REPLY_TOKEN);
     chatRunState.buffers.delete(clientRunId);
     chatRunState.deltaSentAt.delete(clientRunId);
     if (jobState === "done") {
@@ -323,18 +343,16 @@ export function createAgentEventHandler({
         sessionKey,
         seq,
         state: "final" as const,
-        message: text
-          ? {
-              role: "assistant",
-              content: [{ type: "text", text }],
-              timestamp: Date.now(),
-            }
-          : undefined,
+        message:
+          text && !shouldSuppressSilent
+            ? {
+                role: "assistant",
+                content: [{ type: "text", text }],
+                timestamp: Date.now(),
+              }
+            : undefined,
       };
-      // Suppress webchat broadcast for heartbeat runs when showOk is false
-      if (!shouldSuppressHeartbeatBroadcast(clientRunId)) {
-        broadcast("chat", payload);
-      }
+      broadcast("chat", payload);
       nodeSendToSession(sessionKey, "chat", payload);
       return;
     }
@@ -373,12 +391,17 @@ export function createAgentEventHandler({
 
   return (evt: AgentEventPayload) => {
     const chatLink = chatRunState.registry.peek(evt.runId);
-    const sessionKey = chatLink?.sessionKey ?? resolveSessionKeyForRun(evt.runId);
+    const eventSessionKey =
+      typeof evt.sessionKey === "string" && evt.sessionKey.trim() ? evt.sessionKey : undefined;
+    const sessionKey =
+      chatLink?.sessionKey ?? eventSessionKey ?? resolveSessionKeyForRun(evt.runId);
     const clientRunId = chatLink?.clientRunId ?? evt.runId;
+    const eventRunId = chatLink?.clientRunId ?? evt.runId;
+    const eventForClients = chatLink ? { ...evt, runId: eventRunId } : evt;
     const isAborted =
       chatRunState.abortedRuns.has(clientRunId) || chatRunState.abortedRuns.has(evt.runId);
     // Include sessionKey so Control UI can filter tool streams per session.
-    const agentPayload = sessionKey ? { ...evt, sessionKey } : evt;
+    const agentPayload = sessionKey ? { ...eventForClients, sessionKey } : eventForClients;
     const last = agentRunSeq.get(evt.runId) ?? 0;
     const isToolEvent = evt.stream === "tool";
     const toolVerbose = isToolEvent ? resolveToolVerboseLevel(evt.runId, sessionKey) : "off";
@@ -389,12 +412,14 @@ export function createAgentEventHandler({
             const data = evt.data ? { ...evt.data } : {};
             delete data.result;
             delete data.partialResult;
-            return sessionKey ? { ...evt, sessionKey, data } : { ...evt, data };
+            return sessionKey
+              ? { ...eventForClients, sessionKey, data }
+              : { ...eventForClients, data };
           })()
         : agentPayload;
     if (evt.seq !== last + 1) {
       broadcast("agent", {
-        runId: evt.runId,
+        runId: eventRunId,
         stream: "error",
         ts: Date.now(),
         sessionKey,
@@ -428,19 +453,8 @@ export function createAgentEventHandler({
       if (!isToolEvent || toolVerbose !== "off") {
         nodeSendToSession(sessionKey, "agent", isToolEvent ? toolPayload : agentPayload);
       }
-      // Handle assistant stream for real-time chat updates
       if (!isAborted && evt.stream === "assistant" && typeof evt.data?.text === "string") {
-        emitChatDelta(sessionKey, clientRunId, evt.seq, evt.data.text);
-      }
-      // Handle reasoning stream - emit as thinking content
-      else if (!isAborted && evt.stream === "reasoning" && typeof evt.data?.text === "string") {
-        // Emit reasoning as a delta (Feishu can display thinking if supported)
-        emitChatDelta(sessionKey, clientRunId, evt.seq, evt.data.text);
-      }
-      // Handle tool_result stream - emit as tool output
-      else if (!isAborted && evt.stream === "tool_result" && typeof evt.data?.text === "string") {
-        // Emit tool result as a delta
-        emitChatDelta(sessionKey, clientRunId, evt.seq, evt.data.text);
+        emitChatDelta(sessionKey, clientRunId, evt.runId, evt.seq, evt.data.text);
       } else if (!isAborted && (lifecyclePhase === "end" || lifecyclePhase === "error")) {
         if (chatLink) {
           const finished = chatRunState.registry.shift(evt.runId);
@@ -451,6 +465,7 @@ export function createAgentEventHandler({
           emitChatFinal(
             finished.sessionKey,
             finished.clientRunId,
+            evt.runId,
             evt.seq,
             lifecyclePhase === "error" ? "error" : "done",
             evt.data?.error,
@@ -458,6 +473,7 @@ export function createAgentEventHandler({
         } else {
           emitChatFinal(
             sessionKey,
+            eventRunId,
             evt.runId,
             evt.seq,
             lifecyclePhase === "error" ? "error" : "done",
@@ -478,12 +494,8 @@ export function createAgentEventHandler({
     if (lifecyclePhase === "end" || lifecyclePhase === "error") {
       toolEventRecipients.markFinal(evt.runId);
       clearAgentRunContext(evt.runId);
-      // Clean up pending deadline timers
-      const pendingTimer = pendingFlushDeadlines.get(evt.runId);
-      if (pendingTimer) {
-        clearTimeout(pendingTimer);
-        pendingFlushDeadlines.delete(evt.runId);
-      }
+      agentRunSeq.delete(evt.runId);
+      agentRunSeq.delete(clientRunId);
     }
   };
 }

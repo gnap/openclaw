@@ -54,7 +54,7 @@ function coerceYamlFrontmatterValue(value: unknown): ParsedYamlValue | undefined
 
 function parseYamlFrontmatter(block: string): Record<string, ParsedYamlValue> | null {
   try {
-    const parsed = YAML.parse(block) as unknown;
+    const parsed = YAML.parse(block, { schema: "core" }) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return null;
     }
